@@ -58,7 +58,7 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     
     has_env_key = bool(os.environ.get("GEMINI_API_KEY"))
-    api_key_input = st.text_input("Gemini API Key (Optional)", value="", type="password", placeholder="Paste key to override...", help="Leave blank to use key configured on server")
+    api_key_input = st.text_input("Gemini API Key", value="", type="password", placeholder="Enter your Gemini API Key...", help="Leave blank if pre-configured on server")
     
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
