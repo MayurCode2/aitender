@@ -77,8 +77,8 @@ with st.sidebar:
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("1. Upload Tender / RFP PDF")
-    uploaded_pdf = st.file_uploader("Choose a PDF file", type=["pdf"], key="pdf_uploader")
+    st.subheader("1. Upload Tender / RFP PDF(s)")
+    uploaded_pdfs = st.file_uploader("Choose one or multiple PDF files for a single tender", type=["pdf"], accept_multiple_files=True, key="pdf_uploader")
 
 with col2:
     st.subheader("2. Upload BOQ Excel (Optional)")
@@ -91,15 +91,19 @@ OUTPUT_DIR = Path("output")
 INPUT_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-if uploaded_pdf:
-    st.info(f"📄 Selected Tender PDF: **{uploaded_pdf.name}** ({round(uploaded_pdf.size / 1024 / 1024, 2)} MB)")
+if uploaded_pdfs:
+    for up_pdf in uploaded_pdfs:
+        st.info(f"📄 Selected Tender PDF: **{up_pdf.name}** ({round(up_pdf.size / 1024 / 1024, 2)} MB)")
     if uploaded_excel:
         st.info(f"📊 Selected BOQ Excel: **{uploaded_excel.name}**")
         
     if st.button("🚀 Run AI Tender Analysis"):
-        pdf_path = INPUT_DIR / uploaded_pdf.name
-        with open(pdf_path, "wb") as f:
-            f.write(uploaded_pdf.getbuffer())
+        pdf_paths = []
+        for up_pdf in uploaded_pdfs:
+            p_path = INPUT_DIR / up_pdf.name
+            with open(p_path, "wb") as f:
+                f.write(up_pdf.getbuffer())
+            pdf_paths.append(p_path)
             
         excel_path = None
         if uploaded_excel:
@@ -111,7 +115,7 @@ if uploaded_pdf:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        status_text.text("1/4 Loading PDF & Initializing 4-Layer Zero-Token Discovery Engine...")
+        status_text.text("1/4 Loading PDF(s) & Initializing 4-Layer Zero-Token Discovery Engine...")
         progress_bar.progress(25)
 
         # Import analyzer dynamically
@@ -122,12 +126,13 @@ if uploaded_pdf:
             progress_bar.progress(50)
             
             # Run processing engine
-            process_pair(pdf_path, excel_path)
+            process_pair(pdf_paths, excel_path)
 
             progress_bar.progress(85)
             status_text.text("3/4 Building Executive PDF Summary Report with ReportLab...")
             
-            output_pdf_path = OUTPUT_DIR / f"{pdf_path.stem}_summary.pdf"
+            primary_stem = pdf_paths[0].stem
+            output_pdf_path = OUTPUT_DIR / f"{primary_stem}_summary.pdf"
 
             if output_pdf_path.exists():
                 progress_bar.progress(100)
