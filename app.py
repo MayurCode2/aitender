@@ -61,10 +61,9 @@ with st.sidebar:
     api_key_input = st.text_input("Gemini API Key", value="", type="password", placeholder="Enter your Gemini API Key...", help="Leave blank if pre-configured on server")
     
     if api_key_input:
-        os.environ["GEMINI_API_KEY"] = api_key_input
-        st.success("✅ Custom Gemini API Key Applied")
+        st.success("✅ Custom Gemini API Key provided for your session")
     elif has_env_key:
-        st.success("✅ API Key loaded securely from Environment")
+        st.success("✅ API Key loaded securely from Server Environment")
     else:
         st.warning("⚠️ No Gemini API Key found. Paste key above or configure server secrets.")
         
@@ -93,6 +92,21 @@ OUTPUT_DIR = Path("output")
 INPUT_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+def cleanup_old_files():
+    """Removes old uploaded and generated files to keep server disk clean."""
+    for f in INPUT_DIR.glob("*"):
+        if f.is_file():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    for f in OUTPUT_DIR.glob("*"):
+        if f.is_file():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
 if uploaded_pdfs:
     for up_pdf in uploaded_pdfs:
         st.info(f"📄 Selected Tender PDF: **{up_pdf.name}** ({round(up_pdf.size / 1024 / 1024, 2)} MB)")
@@ -100,6 +114,9 @@ if uploaded_pdfs:
         st.info(f"📊 Selected BOQ Excel: **{uploaded_excel.name}**")
         
     if st.button("🚀 Run AI Tender Analysis"):
+        # Auto-clean previous files to save server disk space
+        cleanup_old_files()
+
         pdf_paths = []
         for up_pdf in uploaded_pdfs:
             p_path = INPUT_DIR / up_pdf.name
@@ -127,8 +144,9 @@ if uploaded_pdfs:
             status_text.text("2/4 Executing Multi-Pass AI Extraction (Gemini API)...")
             progress_bar.progress(50)
             
-            # Run processing engine
-            process_pair(pdf_paths, excel_path)
+            # Run processing engine with isolated user key
+            active_key = api_key_input.strip() if api_key_input else None
+            process_pair(pdf_paths, excel_path, api_key=active_key)
 
             progress_bar.progress(85)
             status_text.text("3/4 Building Executive PDF Summary Report with ReportLab...")
