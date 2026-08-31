@@ -57,14 +57,16 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/analytical-skills.png", width=70)
     st.header("⚙️ Configuration")
     
-    env_api_key = os.environ.get("GEMINI_API_KEY", "")
-    api_key_input = st.text_input("Gemini API Key", value=env_api_key, type="password", help="Enter your Google Gemini API Key")
+    has_env_key = bool(os.environ.get("GEMINI_API_KEY"))
+    api_key_input = st.text_input("Gemini API Key (Optional)", value="", type="password", placeholder="Paste key to override...", help="Leave blank to use key configured on server")
     
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
-        st.success("✅ Gemini API Key Configured")
+        st.success("✅ Custom Gemini API Key Applied")
+    elif has_env_key:
+        st.success("✅ API Key loaded securely from Environment")
     else:
-        st.warning("⚠️ No Gemini API Key set. Standard extraction will run in fallback mode.")
+        st.warning("⚠️ No Gemini API Key found. Paste key above or configure server secrets.")
         
     st.divider()
     st.markdown("### 📊 Features")
