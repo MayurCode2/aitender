@@ -609,14 +609,25 @@ def resolve_universal_topic_pages(pages: List[str]) -> Dict[str, List[int]]:
 # SECTION 8: PDF TEXT INGESTION & ROBUST JSON CLEANER
 # ==============================================================================
 
-def extract_pages_from_pdf(pdf_path: Path) -> List[str]:
-    """Extracts text page by page from PDF file."""
+def extract_pages_from_pdf(pdf_input) -> List[str]:
+    """Extracts text page by page from one or multiple PDF files."""
     import pypdf
+    if isinstance(pdf_input, (list, tuple)):
+        pdf_paths = [Path(p) for p in pdf_input]
+    else:
+        pdf_paths = [Path(pdf_input)]
+
     pages = []
-    with open(pdf_path, "rb") as f:
-        reader = pypdf.PdfReader(f)
-        for page in reader.pages:
-            pages.append(page.extract_text() or "")
+    for pdf_path in pdf_paths:
+        if not pdf_path.exists():
+            continue
+        doc_name = pdf_path.name
+        with open(pdf_path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                prefix = f"[Doc: {doc_name} | Page {i+1}]\n" if len(pdf_paths) > 1 else ""
+                pages.append(prefix + text)
     return pages
 
 def clean_json_response(raw_text: str) -> dict:
@@ -704,9 +715,9 @@ def execute_topic_pass(topic: str, text_slice: str) -> dict:
 # SECTION 10: MULTI-PASS EXTRACTION ORCHESTRATOR
 # ==============================================================================
 
-def run_multi_pass_analysis(pdf_path: Path, has_excel: bool = False) -> dict:
+def run_multi_pass_analysis(pdf_input, has_excel: bool = False) -> dict:
     """Orchestrates 10 consolidated extraction passes with zero overlap."""
-    pages = extract_pages_from_pdf(pdf_path)
+    pages = extract_pages_from_pdf(pdf_input)
     total_pages = len(pages)
     total_chars = sum(len(p) for p in pages)
 
@@ -1791,19 +1802,28 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
 # SECTION 14: EXECUTION ORCHESTRATOR & CLI ENTRYPOINT
 # ==============================================================================
 
-def process_pair(pdf_path: Path, excel_path: Path = None):
-    """Processes a single PDF proposal with optional Excel BOQ file."""
+def process_pair(pdf_input, excel_path: Path = None):
+    """Processes single or multiple PDF proposals with optional Excel BOQ file."""
     global USE_GEMINI
     USE_GEMINI = bool(os.environ.get("GEMINI_API_KEY"))
 
+    if isinstance(pdf_input, (list, tuple)):
+        pdf_paths = [Path(p) for p in pdf_input]
+        primary_pdf = pdf_paths[0]
+        pdf_names = ", ".join(p.name for p in pdf_paths)
+    else:
+        primary_pdf = Path(pdf_input)
+        pdf_paths = [primary_pdf]
+        pdf_names = primary_pdf.name
+
     print(f"\n==========================================")
-    print(f" Processing PDF: {pdf_path.name}")
+    print(f" Processing Tender Document(s): {pdf_names}")
     if excel_path and excel_path.exists():
         print(f" Linked Excel:   {excel_path.name}")
     print(f"==========================================")
     try:
         has_excel = bool(excel_path and excel_path.exists())
-        extracted_json = run_multi_pass_analysis(pdf_path, has_excel=has_excel)
+        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel)
 
         if has_excel:
             excel_boq_data = read_boq_excel(excel_path)
@@ -1819,13 +1839,13 @@ def process_pair(pdf_path: Path, excel_path: Path = None):
         print("[*] Generating Tailored Presentation Strategy (Code B Solutions Pvt. Ltd.)...")
         extracted_json["presentation_strategy"] = generate_presentation_strategy(extracted_json)
 
-        out_pdf = OUTPUT_DIR / f"{pdf_path.stem}_summary.pdf"
+        out_pdf = OUTPUT_DIR / f"{primary_pdf.stem}_summary.pdf"
         build_output_pdf(extracted_json, out_pdf)
 
     except Exception as e:
 
         import traceback
-        print(f"[X] Failed to process {pdf_path.name}: {e}")
+        print(f"[X] Failed to process {pdf_names}: {e}")
         traceback.print_exc()
 
 def main():
