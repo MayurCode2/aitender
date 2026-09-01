@@ -663,15 +663,32 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> st
 
     try:
         client = genai.Client(api_key=key_to_use)
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                temperature=0.1
+        # Try gemini-3.6-flash primary
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
             )
-        )
+        except Exception as e_mod:
+            if "404" in str(e_mod) or "NOT_FOUND" in str(e_mod):
+                # Fallback to gemini-1.5-flash if 3.6 is unavailable on this key
+                response = client.models.generate_content(
+                    model='gemini-1.5-flash',
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
+                )
+            else:
+                raise e_mod
         if not response or not response.text:
             raise RuntimeError("Gemini API returned an empty response. Please check your API key permissions.")
         return response.text
