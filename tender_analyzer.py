@@ -5,7 +5,7 @@ Universal AI Tender & Proposal Document Analyzer — 24-Point Comprehensive Tend
 - Smart Cost Decision Engine (Extracts tender budget or calculates AI Min / Recommended / Max quote)
 - Dynamic Submission Document Tracker & Presentation Outline Generator
 - 100% Text-Wrap Protected PDF Report Generator (ReportLab Flowable Tables with Auto-Wrapping Paragraph Cells)
-- Dual LLM Engine: Google Gemini 3.6 Flash (Primary) -> Ollama llama3.2:3b (Offline Fallback)
+- Google Gemini AI Engine with Direct API Error Handling & UI Exception Feedback
 """
 
 # ==============================================================================
@@ -64,15 +64,15 @@ TOPIC_KEYWORDS = {
     ],
     "timeline_and_dates": [
         "publication date", "date of issue", "bid submission", "last date",
-        "submission deadline", "opening of bid", "technical bid opening",
-        "financial bid opening", "pre-bid", "query submission deadline",
+        "submission deadline", "opening of bid", "technical bid opening", "bid opening date",
+        "financial bid opening", "pre-bid", "query submission deadline", "date of bid opening",
         "project timeline", "timeline", "delivery schedule", "phase 1", "phase 2",
-        "duration", "weeks", "work schedule", "go-live", "schedule of events"
+        "duration", "weeks", "work schedule", "go-live", "schedule of events", "critical dates", "key dates"
     ],
     "submission_and_prebid": [
         "online submission", "offline submission", "portal submission", "submit online",
         "digital signature", "dsc", "emd", "earnest money deposit", "eprocure", "gem portal",
-        "two packet", "three packet", "bid opening", "technical bid opening", "financial bid opening",
+        "two packet", "three packet", "bid opening", "technical bid opening", "financial bid opening", "bid opening date",
         "date of presentations", "rtgs", "neft", "demand draft", "bank guarantee", "account number", "ifsc", "beneficiary",
         "in favour of", "payable at", "banker's cheque", "pay order", "tender processing fee", "proof of payment", "transaction reference", "utr",
         "msme exemption", "bid security declaration", "tender fee", "pre-bid meeting", "pre-bid conference",
@@ -192,11 +192,12 @@ DOCUMENT TEXT:
 ---""",
 
     "timeline_and_dates": """Extract ALL important tender dates, project implementation timeline phases, and exact contract duration from the document.
+MUST extract: Publication Date, Pre-Bid Meeting Date, Bid Submission Deadline, Technical Bid Opening Date & Time, Financial Bid Opening Date & Time, and Presentation Date.
 Return ONLY valid JSON:
 {{
   "timeline_and_dates": {{
     "important_dates": [
-      {{"event": "<Event e.g. Publication / Pre-Bid / Bid Closing / Technical Bid Opening / Presentation>", "date": "<DD/MM/YYYY>", "time": "<Time or blank>", "priority": "<High/Medium/Low>"}}
+      {{"event": "<Event e.g. Publication / Pre-Bid / Bid Closing / Technical Bid Opening / Financial Bid Opening / Presentation>", "date": "<DD/MM/YYYY>", "time": "<Time or blank>", "priority": "<High/Medium/Low>"}}
     ],
     "contract_duration": {{
       "total_duration_months": "<Total engagement duration e.g. 14 months>",
@@ -581,8 +582,8 @@ def resolve_universal_topic_pages(pages: List[str]) -> Dict[str, List[int]]:
     final_map = {}
     for topic in TOPIC_KEYWORDS:
         layer_pages = []
-        if topic == "tender_overview":
-            layer_pages.extend([0, 1])  # Cover pages always contain project title, NIT/Ref number, and issuing authority
+        if topic in ["tender_overview", "timeline_and_dates", "submission_and_prebid"]:
+            layer_pages.extend([0, 1, 2])  # Cover/NIT pages always contain critical date schedules & bid opening info
         if topic in toc_map and toc_map[topic]:
             layer_pages.extend(toc_map[topic][:3])
         if topic in semantic_map and semantic_map[topic]:
@@ -649,73 +650,55 @@ def clean_json_response(raw_text: str) -> dict:
     return {}
 
 # ==============================================================================
-# SECTION 9: DUAL-MODEL LLM CLIENTS (Gemini Primary -> Ollama Fallback)
+# SECTION 9: GEMINI LLM CLIENT & EXTRACTION ENGINE
 # ==============================================================================
 
-USE_GEMINI = bool(os.environ.get("GEMINI_API_KEY"))
-
-def call_gemini(system_prompt: str, user_prompt: str) -> str:
-    """Invokes Google Gemini 3.6 Flash."""
+def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> str:
+    """Invokes Google Gemini API directly."""
     from google import genai
     from google.genai import types
-    client = genai.Client()
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            temperature=0.1
+    key_to_use = api_key or os.environ.get("GEMINI_API_KEY")
+    if not key_to_use:
+        raise ValueError("No Gemini API Key provided. Please enter a valid Gemini API Key in the sidebar or set the GEMINI_API_KEY environment variable.")
+
+    try:
+        client = genai.Client(api_key=key_to_use)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                temperature=0.1
+            )
         )
-    )
-    return response.text
+        if not response or not response.text:
+            raise RuntimeError("Gemini API returned an empty response. Please check your API key permissions.")
+        return response.text
+    except Exception as e:
+        err_str = str(e)
+        if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
+            raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
+        elif "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+            raise RuntimeError("Gemini API Rate Limit / Quota Exceeded. Please try again later or provide a key with quota.") from e
+        else:
+            raise RuntimeError(f"Gemini API Error: {err_str}") from e
 
-def call_ollama(system_prompt: str, user_prompt: str) -> str:
-    """Invokes local Ollama fallback model."""
-    import urllib.request
-    payload = {
-        "model": "llama3.2:3b",
-        "prompt": f"{system_prompt}\n\n{user_prompt}",
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1}
-    }
-    req = urllib.request.Request(
-        "http://localhost:11434/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
-        return res.get("response", "")
-
-def execute_topic_pass(topic: str, text_slice: str) -> dict:
-    """Executes targeted extraction for a topic with dual-model fallback."""
+def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict:
+    """Executes targeted extraction for a topic using Google Gemini API."""
     prompt_template = TOPIC_PROMPTS.get(topic)
     if not prompt_template:
         return {}
     user_prompt = prompt_template.format(document_text=text_slice)
 
-    global USE_GEMINI
-    if USE_GEMINI:
-        try:
-            raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt)
-            return clean_json_response(raw_resp)
-        except Exception as e:
-            print(f"    [!] Gemini API failed ({e}). Falling back to Ollama...")
-
-    try:
-        raw_resp = call_ollama(LLM_SYSTEM_PROMPT, user_prompt)
-        return clean_json_response(raw_resp)
-    except Exception as e:
-        print(f"    [X] Both LLMs failed for topic '{topic}': {e}")
-        return {}
+    raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key)
+    return clean_json_response(raw_resp)
 
 # ==============================================================================
 # SECTION 10: MULTI-PASS EXTRACTION ORCHESTRATOR
 # ==============================================================================
 
-def run_multi_pass_analysis(pdf_input, has_excel: bool = False) -> dict:
+def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = None) -> dict:
     """Orchestrates 10 consolidated extraction passes with zero overlap."""
     pages = extract_pages_from_pdf(pdf_input)
     total_pages = len(pages)
@@ -753,7 +736,7 @@ def run_multi_pass_analysis(pdf_input, has_excel: bool = False) -> dict:
         page_labels = ", ".join(f"P.{p+1}" for p in page_nums)
         print(f"    -> Extracting '{topic}' from [{page_labels}] ({len(text_slice):,} chars)...")
 
-        result = execute_topic_pass(topic, text_slice)
+        result = execute_topic_pass(topic, text_slice, api_key=api_key)
         merged_data.update(result)
         time.sleep(0.4)
 
@@ -1550,15 +1533,32 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
 
         # 4B. Bid Opening Schedule
         opening = sub.get("bid_opening_schedule", {})
-        if isinstance(opening, dict) and opening:
-            op_rows = [
-                ["Technical Bid Opening", opening.get("technical_bid_opening", "-")],
-                ["Financial Bid Opening", opening.get("financial_bid_opening", "To be informed to technically qualified bidders")],
-                ["Presentation / Demonstration", opening.get("presentation_date", "To be informed over email")]
-            ]
-            t_op = create_wrapped_table(op_rows, [160, 380], is_first_row_header=False)
-            if t_op:
-                elements.extend([Paragraph("<b>B. Bid Opening & Evaluation Schedule:</b>", body_style), t_op, Spacer(1, 3)])
+        if not isinstance(opening, dict):
+            opening = {}
+
+        # Fallback check from important_dates if bid_opening_schedule is missing values
+        tech_opening_val = opening.get("technical_bid_opening", "")
+        fin_opening_val = opening.get("financial_bid_opening", "")
+        if (not tech_opening_val or tech_opening_val in ["-", "To be informed"]):
+            for d in dates_list:
+                if isinstance(d, dict) and any(w in str(d.get("event", "")).lower() for w in ["bid opening", "technical bid opening", "technical opening"]):
+                    tech_opening_val = f"{d.get('date', '')} {d.get('time', '')}".strip()
+                    break
+
+        if (not fin_opening_val or fin_opening_val in ["-", "To be informed"]):
+            for d in dates_list:
+                if isinstance(d, dict) and any(w in str(d.get("event", "")).lower() for w in ["financial bid opening", "financial opening"]):
+                    fin_opening_val = f"{d.get('date', '')} {d.get('time', '')}".strip()
+                    break
+
+        op_rows = [
+            ["Technical Bid Opening", tech_opening_val or "To be informed"],
+            ["Financial Bid Opening", fin_opening_val or "To be informed to technically qualified bidders"],
+            ["Presentation / Demonstration", opening.get("presentation_date", "To be informed over email")]
+        ]
+        t_op = create_wrapped_table(op_rows, [160, 380], is_first_row_header=False)
+        if t_op:
+            elements.extend([Paragraph("<b>B. Bid Opening & Evaluation Schedule:</b>", body_style), t_op, Spacer(1, 3)])
 
         # 4C. EMD, Tender Fee & Payment Modes / Banking Information
         payment = sub.get("emd_and_fee_payment", {})
@@ -1802,11 +1802,8 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
 # SECTION 14: EXECUTION ORCHESTRATOR & CLI ENTRYPOINT
 # ==============================================================================
 
-def process_pair(pdf_input, excel_path: Path = None):
+def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output_dir: Path = None):
     """Processes single or multiple PDF proposals with optional Excel BOQ file."""
-    global USE_GEMINI
-    USE_GEMINI = bool(os.environ.get("GEMINI_API_KEY"))
-
     if isinstance(pdf_input, (list, tuple)):
         pdf_paths = [Path(p) for p in pdf_input]
         primary_pdf = pdf_paths[0]
@@ -1823,7 +1820,7 @@ def process_pair(pdf_input, excel_path: Path = None):
     print(f"==========================================")
     try:
         has_excel = bool(excel_path and excel_path.exists())
-        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel)
+        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel, api_key=api_key)
 
         if has_excel:
             excel_boq_data = read_boq_excel(excel_path)
@@ -1839,14 +1836,16 @@ def process_pair(pdf_input, excel_path: Path = None):
         print("[*] Generating Tailored Presentation Strategy (Code B Solutions Pvt. Ltd.)...")
         extracted_json["presentation_strategy"] = generate_presentation_strategy(extracted_json)
 
-        out_pdf = OUTPUT_DIR / f"{primary_pdf.stem}_summary.pdf"
+        target_out_dir = Path(output_dir) if output_dir else OUTPUT_DIR
+        target_out_dir.mkdir(exist_ok=True, parents=True)
+        out_pdf = target_out_dir / f"{primary_pdf.stem}_summary.pdf"
         build_output_pdf(extracted_json, out_pdf)
 
     except Exception as e:
-
         import traceback
         print(f"[X] Failed to process {pdf_names}: {e}")
         traceback.print_exc()
+        raise e
 
 def main():
     """Main CLI entrypoint."""
