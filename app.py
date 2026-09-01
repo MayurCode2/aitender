@@ -4,6 +4,34 @@ import time
 from pathlib import Path
 import streamlit as st
 
+# Setup base input & output directory constants
+INPUT_DIR = Path("input")
+OUTPUT_DIR = Path("output")
+INPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+def cleanup_old_files():
+    """Removes all old uploaded and generated files/folders to keep storage clean."""
+    cleaned_count = 0
+    for base_dir in [INPUT_DIR, OUTPUT_DIR]:
+        for item in base_dir.glob("*"):
+            if item.is_file():
+                try:
+                    item.unlink()
+                    cleaned_count += 1
+                except Exception:
+                    pass
+            elif item.is_dir():
+                try:
+                    for child in item.glob("*"):
+                        if child.is_file():
+                            child.unlink()
+                    item.rmdir()
+                    cleaned_count += 1
+                except Exception:
+                    pass
+    return cleaned_count
+
 # Set Streamlit Page Configuration
 st.set_page_config(
     page_title="Universal AI Tender & Proposal Analyzer",
@@ -61,7 +89,7 @@ with st.sidebar:
     api_key_input = st.text_input("Gemini API Key", value="", type="password", placeholder="Enter your Gemini API Key...", help="Leave blank if pre-configured on server")
     
     if api_key_input:
-        st.success("✅ Custom Gemini API Key provided for your session")
+        st.success("✅ Custom Gemini API Key provided")
     elif has_env_key:
         st.success("✅ API Key loaded securely from Server Environment")
     else:
@@ -73,6 +101,12 @@ with st.sidebar:
     st.markdown("- **Dynamic Table Extraction**")
     st.markdown("- **Commercial Cost Guard**")
     st.markdown("- **Executive PDF Generation**")
+    
+    st.divider()
+    st.markdown("### 🗑️ Storage Management")
+    if st.button("🧹 Remove All Old Docs", help="Clears old input files and generated summaries"):
+        num_removed = cleanup_old_files()
+        st.sidebar.success(f"Cleaned {num_removed} old file(s)!")
 
 # Main Layout: File Uploaders
 col1, col2 = st.columns(2)
@@ -87,25 +121,19 @@ with col2:
 
 st.divider()
 
-INPUT_DIR = Path("input")
-OUTPUT_DIR = Path("output")
-INPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
+# Auto-cleanup old files when uploaded document selection changes
+current_pdf_names = set(up.name for up in uploaded_pdfs) if uploaded_pdfs else set()
+current_excel_name = uploaded_excel.name if uploaded_excel else None
+current_upload_signature = (tuple(sorted(current_pdf_names)), current_excel_name)
 
-def cleanup_old_files():
-    """Removes old uploaded and generated files to keep server disk clean."""
-    for f in INPUT_DIR.glob("*"):
-        if f.is_file():
-            try:
-                f.unlink()
-            except Exception:
-                pass
-    for f in OUTPUT_DIR.glob("*"):
-        if f.is_file():
-            try:
-                f.unlink()
-            except Exception:
-                pass
+if "last_upload_signature" not in st.session_state:
+    st.session_state.last_upload_signature = None
+
+if st.session_state.last_upload_signature != current_upload_signature:
+    cleaned = cleanup_old_files()
+    st.session_state.last_upload_signature = current_upload_signature
+    if cleaned > 0 and (uploaded_pdfs or uploaded_excel):
+        st.toast(f"🧹 Removed {cleaned} old file(s) for fresh upload.", icon="✨")
 
 if uploaded_pdfs:
     for up_pdf in uploaded_pdfs:
@@ -114,7 +142,12 @@ if uploaded_pdfs:
         st.info(f"📊 Selected BOQ Excel: **{uploaded_excel.name}**")
         
     if st.button("🚀 Run AI Tender Analysis"):
-        # Auto-clean previous files to save server disk space
+        active_key = api_key_input.strip() if api_key_input else None
+        if not active_key and not os.environ.get("GEMINI_API_KEY"):
+            st.error("❌ **Gemini API Key Missing!** Please paste your Gemini API key in the sidebar configuration to run the analysis.")
+            st.stop()
+
+        # Auto-clean previous files before saving new ones
         cleanup_old_files()
 
         pdf_paths = []
@@ -141,11 +174,10 @@ if uploaded_pdfs:
         from tender_analyzer import process_pair, OUTPUT_DIR
 
         try:
-            status_text.text("2/4 Executing Multi-Pass AI Extraction (Gemini API)...")
+            status_text.text("2/4 Executing Multi-Pass AI Extraction (Google Gemini API)...")
             progress_bar.progress(50)
             
-            # Run processing engine with isolated user key
-            active_key = api_key_input.strip() if api_key_input else None
+            # Run processing engine
             process_pair(pdf_paths, excel_path, api_key=active_key)
 
             progress_bar.progress(85)
@@ -175,7 +207,9 @@ if uploaded_pdfs:
                 st.error("❌ Could not find output PDF. Please check server logs.")
                 
         except Exception as e:
-            st.error(f"❌ An error occurred during analysis: {e}")
-            st.exception(e)
+            progress_bar.progress(100)
+            status_text.empty()
+            st.error(f"❌ **Gemini API / Analysis Error:** {e}")
+            st.warning("💡 **Troubleshooting Tips:**\n- Verify that your Gemini API Key entered in the sidebar is valid.\n- Check if your Google AI Studio quota / rate limit has been exceeded.\n- Ensure your network connection can access Google Gemini services.")
 else:
     st.info("💡 Please upload a Tender PDF above to get started.")
