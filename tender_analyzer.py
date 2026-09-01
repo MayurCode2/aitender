@@ -631,22 +631,38 @@ def extract_pages_from_pdf(pdf_input) -> List[str]:
                 pages.append(prefix + text)
     return pages
 
-def clean_json_response(raw_text: str) -> dict:
-    """Parses JSON cleanly from LLM response strings."""
+def clean_json_response(raw_text: str, topic_key: str = None) -> dict:
+    """Parses JSON cleanly from LLM response strings and guarantees a dictionary output."""
     if not raw_text or not raw_text.strip():
         return {}
     cleaned = re.sub(r"^```(?:json)?", "", raw_text.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE).strip()
+    parsed = None
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError:
-        pass
-    json_match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
-            pass
+        json_match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+    if isinstance(parsed, dict):
+        return parsed
+    elif isinstance(parsed, list):
+        if topic_key == "required_documents_and_stamp":
+            return {"required_documents_and_stamp": {"documents": parsed}}
+        elif topic_key == "team_and_cv":
+            return {"team_and_cv": {"roles": parsed}}
+        elif topic_key == "timeline_and_dates":
+            return {"timeline_and_dates": {"important_dates": parsed}}
+        elif topic_key == "eligibility_and_experience":
+            return {"eligibility_and_experience": {"similar_projects": parsed}}
+        elif topic_key:
+            return {topic_key: parsed}
+        else:
+            return {"items": parsed}
     return {}
 
 # ==============================================================================
@@ -709,7 +725,8 @@ def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict
     user_prompt = prompt_template.format(document_text=text_slice)
 
     raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key)
-    return clean_json_response(raw_resp)
+    res = clean_json_response(raw_resp, topic_key=topic)
+    return res if isinstance(res, dict) else {topic: res}
 
 # ==============================================================================
 # SECTION 10: MULTI-PASS EXTRACTION ORCHESTRATOR
@@ -754,7 +771,10 @@ def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = N
         print(f"    -> Extracting '{topic}' from [{page_labels}] ({len(text_slice):,} chars)...")
 
         result = execute_topic_pass(topic, text_slice, api_key=api_key)
-        merged_data.update(result)
+        if isinstance(result, dict):
+            merged_data.update(result)
+        elif isinstance(result, list):
+            merged_data[topic] = result
         time.sleep(0.4)
 
     # Regex scan for external URLs (0 tokens)
@@ -961,7 +981,7 @@ def calculate_quotation(extracted_data: dict) -> dict:
     """
     Dual Commercial Costing Engine:
     - Extracts Client/Tender Official Budget (if provided).
-    - Dynamically calculates Role-by-Role Industry Standard Rates from extracted team seniority.
+    - Dynamically calculates Role-by-Role Industry Standard Rates from the exact team defined in Section 7.
     - Calculates Code B Solutions' Base Cost Breakdown & 3-Tier Bid Strategy (Min, Recommended, Max Quote + GST).
     - If Client Budget is available: performs Variance & Budget Feasibility Analysis.
     """
@@ -969,8 +989,8 @@ def calculate_quotation(extracted_data: dict) -> dict:
         return f"Rs. {val:,.0f}"
 
     # Step A: Determine exact project contract duration (Phase 1 + Phase 2)
-    phase_1_months = 2   # Standard Phase-1 Build & Go-Live (8 Weeks / 2 Months as per Section 5)
-    phase_2_months = 12  # Standard Phase-2 Support & AMC (12 Months as per Section 5)
+    phase_1_months = 2   # Standard Phase-1 Build & Go-Live (2 Months / 8 Weeks)
+    phase_2_months = 12  # Standard Phase-2 Support & AMC (12 Months)
     total_months = 14    # Total Contract Engagement Duration (14 Months)
 
     t_dates = extracted_data.get("timeline_and_dates", {})
@@ -986,12 +1006,12 @@ def calculate_quotation(extracted_data: dict) -> dict:
             m_p2 = re.search(r"(\d+)", p2_str)
 
             if m_p1:
-                phase_1_months = int(m_p1.group(1))
+                phase_1_months = max(1, int(m_p1.group(1)))
             if m_p2:
-                phase_2_months = int(m_p2.group(1))
+                phase_2_months = max(1, int(m_p2.group(1)))
             if m_tot:
-                total_months = int(m_tot.group(1))
-            elif m_p1 and m_p2:
+                total_months = max(1, int(m_tot.group(1)))
+            else:
                 total_months = phase_1_months + phase_2_months
         else:
             t_phases = t_dates.get("phases_timeline", [])
@@ -1009,8 +1029,15 @@ def calculate_quotation(extracted_data: dict) -> dict:
                 if 2 <= extracted_sum <= 36:
                     total_months = extracted_sum
 
-    # Step B: Determine team composition & dynamic role-by-role monthly cost
-    team_roles = extracted_data.get("team_and_cv", {}).get("roles", [])
+    # Step B: Determine team composition & dynamic role-by-role monthly cost from Section 7 team_and_cv
+    team_data = extracted_data.get("team_and_cv", {})
+    if isinstance(team_data, list):
+        team_roles = team_data
+    elif isinstance(team_data, dict):
+        team_roles = team_data.get("roles", [])
+    else:
+        team_roles = []
+
     role_rate_details = []
     total_monthly_burn = 0
     total_resources = 0
@@ -1029,13 +1056,24 @@ def calculate_quotation(extracted_data: dict) -> dict:
                 total_monthly_burn += role_monthly_total
                 total_resources += r_cnt
 
-                role_rate_details.append(f"{r_name} ({r_exp}): {_fmt_inr(monthly_rate_for_role)}/mo")
+                qty_label = f" (Qty: {r_cnt})" if r_cnt > 1 else ""
+                role_rate_details.append(f"• {r_name} ({r_exp}){qty_label}: {_fmt_inr(monthly_rate_for_role)}/mo | Subtotal: {_fmt_inr(role_monthly_total)}/mo")
 
     if total_resources == 0:
         total_resources = 7
         total_monthly_burn = 7 * 95000
 
     blended_monthly_rate = int(total_monthly_burn / max(1, total_resources))
+
+    # Phase 1 Build Manpower (100% full team deployment)
+    phase_1_manpower_cost = total_monthly_burn * phase_1_months
+
+    # Phase 2 Support & AMC Manpower (~35% allocation for dedicated L1-L3 SLA engineers)
+    phase_2_monthly_burn = max(60000, int(total_monthly_burn * 0.35))
+    phase_2_manpower_cost = phase_2_monthly_burn * phase_2_months
+
+    # Total Manpower Cost across complete engagement
+    manpower_cost = phase_1_manpower_cost + phase_2_manpower_cost
 
     # Step C: Determine technology complexity multiplier
     tech_multiplier = 1.0
@@ -1049,11 +1087,10 @@ def calculate_quotation(extracted_data: dict) -> dict:
         elif "mobile" in cat_str:
             tech_multiplier = 1.15
 
-    # Step D: Base Cost Breakdown calculations (Dynamic Role Rates x Months)
-    manpower_cost = total_monthly_burn * total_months
-    tech_cost = int(manpower_cost * 0.20 * tech_multiplier)
-    qa_cost = int(manpower_cost * 0.12)
-    support_cost = int(manpower_cost * 0.10)
+    # Step D: Base Cost Breakdown calculations
+    tech_cost = int(manpower_cost * 0.18 * tech_multiplier)
+    qa_cost = int(manpower_cost * 0.10)
+    support_cost = int(manpower_cost * 0.08)
     contingency = int((manpower_cost + tech_cost) * 0.05)
     base_cost = manpower_cost + tech_cost + qa_cost + support_cost + contingency
 
@@ -1134,14 +1171,15 @@ def calculate_quotation(extracted_data: dict) -> dict:
         "phase_2_months": phase_2_months,
         "duration_months": total_months,
         "monthly_team_burn": _fmt_inr(total_monthly_burn),
+        "phase_2_monthly_burn": _fmt_inr(phase_2_monthly_burn),
         "blended_monthly_rate": _fmt_inr(blended_monthly_rate),
         "estimated_base_cost": _fmt_inr(base_cost),
         "role_rate_details": role_rate_details,
         "breakdown_rows": [
-            ["1. Direct Manpower Cost", f"{total_resources} Key Resources x {total_months} Months ({phase_1_months}m Build + {phase_2_months}m AMC) | Team Burn: {_fmt_inr(total_monthly_burn)}/month", _fmt_inr(manpower_cost)],
-            ["2. Technology & Cloud Infrastructure", f"20% of Manpower ({tech_multiplier:.2f}x Tech Index)", _fmt_inr(tech_cost)],
-            ["3. QA, Testing & DevOps Automation", "12% of Manpower", _fmt_inr(qa_cost)],
-            ["4. Post-Deployment Support & AMC", "10% of Manpower", _fmt_inr(support_cost)],
+            ["1. Direct Manpower Cost", f"{total_resources} Key Personnel: Phase 1 Build ({phase_1_months}m @ {_fmt_inr(total_monthly_burn)}/mo) + Phase 2 Support & AMC ({phase_2_months}m @ {_fmt_inr(phase_2_monthly_burn)}/mo)", _fmt_inr(manpower_cost)],
+            ["2. Technology & Cloud Infrastructure", f"18% of Manpower ({tech_multiplier:.2f}x Tech Complexity Index)", _fmt_inr(tech_cost)],
+            ["3. QA, Security Audit & Testing Automation", "10% of Manpower (VAPT & STQC Alignment)", _fmt_inr(qa_cost)],
+            ["4. Documentation, User Training & Handover", "8% of Manpower", _fmt_inr(support_cost)],
             ["5. Risk & Contingency Buffer", "5% of (Manpower + Tech)", _fmt_inr(contingency)],
             ["TOTAL ESTIMATED BASE COST", "Sum of components 1 to 5", _fmt_inr(base_cost)]
         ],
@@ -1150,7 +1188,7 @@ def calculate_quotation(extracted_data: dict) -> dict:
             ["2. Recommended Bid (Balanced)", "+20%", _fmt_inr(rec_q), _fmt_inr(rec_gst), _fmt_inr(rec_total)],
             ["3. Max / Premium Bid", "+30%", _fmt_inr(max_q), _fmt_inr(max_gst), _fmt_inr(max_total)]
         ],
-        "note": f"Note: Code B Solutions manpower costing is dynamically computed based on industry-standard rate cards for {total_resources} key personnel profiles over {total_months} months total engagement ({phase_1_months} months Build + {phase_2_months} months Support & Maintenance as per tender Section 5)."
+        "note": f"Note: Code B Solutions manpower costing is dynamically computed based on industry-standard rate cards for the {total_resources} key personnel profiles defined in Section 7 over {total_months} months total engagement ({phase_1_months} months Build + {phase_2_months} months Support & Maintenance as per tender Section 5)."
     }
 
 
@@ -1160,7 +1198,17 @@ def build_submission_checklist(extracted_data: dict) -> list:
     seen = set()
 
     # From required documents
-    docs = extracted_data.get("required_documents_and_stamp", {}).get("documents", [])
+    req_docs_section = extracted_data.get("required_documents_and_stamp", {})
+    if isinstance(req_docs_section, list):
+        docs = req_docs_section
+        stamps = []
+    elif isinstance(req_docs_section, dict):
+        docs = req_docs_section.get("documents", [])
+        stamps = req_docs_section.get("stamp_paper", [])
+    else:
+        docs = []
+        stamps = []
+
     if isinstance(docs, list):
         for d in docs:
             if isinstance(d, dict):
@@ -1177,7 +1225,6 @@ def build_submission_checklist(extracted_data: dict) -> list:
                     })
 
     # From stamp paper
-    stamps = extracted_data.get("required_documents_and_stamp", {}).get("stamp_paper", [])
     if isinstance(stamps, list):
         for s in stamps:
             if isinstance(s, dict):
@@ -1360,6 +1407,148 @@ def generate_presentation_strategy(extracted_data: dict) -> dict:
         "status_label": "Presentation Required: YES (Scope-Aligned Custom Strategy Deck)",
         "strategy_type": "Scope-Aligned Comprehensive Strategy Deck",
         "slides": slides
+    }
+
+def build_ai_team_composition(data: dict) -> dict:
+    """Generates comprehensive Team Composition & Resource Profiles (Tender-Specified + AI Defined)."""
+    raw_team = data.get("team_and_cv", {})
+    if isinstance(raw_team, list):
+        existing_roles = raw_team
+        raw_team = {}
+    elif isinstance(raw_team, dict):
+        existing_roles = raw_team.get("roles", [])
+    else:
+        existing_roles = []
+        raw_team = {}
+
+    scope_info = data.get("scope_and_tech", {})
+    if not isinstance(scope_info, dict):
+        scope_info = {}
+
+    valid_existing_roles = []
+    if isinstance(existing_roles, list):
+        for r in existing_roles:
+            if isinstance(r, dict) and r.get("role") and str(r.get("role")).strip() not in ("—", "-", "Not Specified", ""):
+                r["source"] = "Tender Specified"
+                valid_existing_roles.append(r)
+
+    # Determine project category & characteristics using strict word boundaries to avoid false positives (e.g. 'ai' in 'domain' or 'ml' in 'html')
+    cat_str = str(scope_info.get("primary_category", "")).lower()
+    summary_str = str(scope_info.get("summary", "")).lower()
+    tech_list = [str(t).lower() for t in scope_info.get("specific_technologies", [])] if isinstance(scope_info.get("specific_technologies"), list) else []
+    tech_str = " ".join(tech_list)
+    full_scope_text = f"{cat_str} {summary_str} {tech_str}".lower()
+    is_ai = bool(re.search(r"\b(artificial intelligence|machine learning|generative ai|deep learning|computer vision|llm model|nlp model)\b", full_scope_text))
+    is_mobile = bool(re.search(r"\b(mobile app|android app|ios app|flutter|react native|kotlin|swift)\b", full_scope_text))
+
+    ai_defined_roles = []
+
+    # If tender didn't specify roles, or specifies fewer than 3 roles, generate complete AI Defined Team Structure
+    if len(valid_existing_roles) < 3:
+        ai_defined_roles.append({
+            "role": "Project Manager / Scrum Master",
+            "count": 1,
+            "min_experience": "5+ Years",
+            "qualifications": "B.Tech / BE / MCA / PMP / CSM",
+            "responsibilities": "Overall project execution, Agile sprint governance, client stakeholder communication & milestone sign-offs.",
+            "source": "AI Recommended Profile"
+        })
+
+        ai_defined_roles.append({
+            "role": "Lead Solution & Technical Architect",
+            "count": 1,
+            "min_experience": "8+ Years",
+            "qualifications": "B.Tech / M.Tech in CS/IT",
+            "responsibilities": "System architecture design, DB schema modeling, security protocols, API gateway design & code reviews.",
+            "source": "AI Recommended Profile"
+        })
+
+        ai_defined_roles.append({
+            "role": "Senior Full-Stack / Backend Developer",
+            "count": 2,
+            "min_experience": "4+ Years",
+            "qualifications": "B.Tech / BE / MCA",
+            "responsibilities": "Core business logic implementation, RESTful API development, database optimization & third-party integrations.",
+            "source": "AI Recommended Profile"
+        })
+
+        if is_mobile:
+            ai_defined_roles.append({
+                "role": "Mobile Application Developer (iOS/Android)",
+                "count": 1,
+                "min_experience": "4+ Years",
+                "qualifications": "B.Tech / BE / BCA",
+                "responsibilities": "Native/Cross-platform mobile app development, offline sync, push notifications & app store publishing.",
+                "source": "AI Recommended Profile"
+            })
+
+        ai_defined_roles.append({
+            "role": "Frontend / UI-UX Engineer",
+            "count": 1,
+            "min_experience": "3+ Years",
+            "qualifications": "B.Tech / BE / BCA / Design Certification",
+            "responsibilities": "Responsive web interface, GIGW / WCAG 2.1 accessibility compliance, wireframing & cross-browser compatibility.",
+            "source": "AI Recommended Profile"
+        })
+
+        if is_ai:
+            ai_defined_roles.append({
+                "role": "AI / Data Science Specialist",
+                "count": 1,
+                "min_experience": "4+ Years",
+                "qualifications": "B.Tech / M.Tech in AI/ML or Data Science",
+                "responsibilities": "AI model training, NLP text extraction pipeline, vector indexing & LLM integration.",
+                "source": "AI Recommended Profile"
+            })
+
+        ai_defined_roles.append({
+            "role": "QA & Security Testing Lead",
+            "count": 1,
+            "min_experience": "3+ Years",
+            "qualifications": "B.Tech / BE / ISTQB Certified",
+            "responsibilities": "Functional testing, automated regression suite, UAT support & STQC/VAPT security audit compliance.",
+            "source": "AI Recommended Profile"
+        })
+
+        ai_defined_roles.append({
+            "role": "DevOps & Cloud Deployment Lead",
+            "count": 1,
+            "min_experience": "4+ Years",
+            "qualifications": "B.Tech / AWS / Azure / CKA Certified",
+            "responsibilities": "CI/CD automated deployment, NIC / Meghraj / Cloud hosting server setup, SSL security & automated backups.",
+            "source": "AI Recommended Profile"
+        })
+
+    # Combine valid tender-specified roles with AI defined roles (prevent duplicate role names)
+    combined_roles = list(valid_existing_roles)
+    existing_role_names = set(str(r.get("role", "")).lower() for r in combined_roles)
+
+    for ar in ai_defined_roles:
+        if ar["role"].lower() not in existing_role_names:
+            combined_roles.append(ar)
+
+    # Calculate total headcount
+    total_headcount = 0
+    for r in combined_roles:
+        try:
+            cnt = int(r.get("count", 1))
+        except (ValueError, TypeError):
+            cnt = 1
+        total_headcount += cnt
+
+    specified_flag = "Tender Mandated & AI Supplemented" if valid_existing_roles else "AI Defined Resource Profile (Tender does not specify explicit staffing)"
+
+    return {
+        "overview": raw_team.get("overview", "Dedicated project team structured for end-to-end design, development, testing, deployment, and support."),
+        "total_headcount": total_headcount,
+        "team_source_label": specified_flag,
+        "total_cvs_required": raw_team.get("total_cvs_required", f"{total_headcount} Core CVs"),
+        "roles": combined_roles,
+        "cv_submission_rules": raw_team.get("cv_submission_rules", {
+            "format": "Standard Government / Corporate CV Format",
+            "signed_cv_required": "Yes (Signed by Authorized Signatory)",
+            "notes": "CVs must include educational certificates, experience letters, and project references."
+        })
     }
 
 
@@ -1669,15 +1858,31 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
     team = data.get("team_and_cv", {})
     if isinstance(team, dict) and team:
         elements.append(Paragraph("7. Team Composition & Resource Profiles", h2_style))
+        headcount = team.get("total_headcount", "-")
+        source_label = team.get("team_source_label", "Tender Specified & AI Defined")
+        elements.append(Paragraph(f"<b>Total Required Team Size:</b> {headcount} Professionals | <b>Resource Profile Source:</b> {source_label}", body_style))
+
         roles = team.get("roles", [])
         if isinstance(roles, list) and roles:
-            r_rows = [["Role / Profile", "Count", "Min Exp", "Qualifications", "Key Responsibilities"]]
+            r_rows = [["Role / Profile", "Count", "Min Exp", "Qualifications", "Key Responsibilities & Skills", "Origin"]]
             for r in roles:
                 if isinstance(r, dict):
-                    r_rows.append([r.get("role", "—"), str(r.get("count", "1")), r.get("min_experience", "—"), r.get("qualifications", "—"), r.get("responsibilities", "—")])
-            t_r = create_wrapped_table(r_rows, [110, 35, 55, 140, 200], is_first_row_header=True)
+                    r_rows.append([
+                        r.get("role", "—"),
+                        str(r.get("count", "1")),
+                        r.get("min_experience", "—"),
+                        r.get("qualifications", "—"),
+                        r.get("responsibilities", "—"),
+                        r.get("source", "AI Recommended Profile")
+                    ])
+            t_r = create_wrapped_table(r_rows, [95, 30, 45, 110, 185, 75], is_first_row_header=True, bg_color="#1a5276")
             if t_r:
-                elements.extend([t_r, Spacer(1, 4)])
+                elements.extend([t_r, Spacer(1, 3)])
+
+        cv_rules = team.get("cv_submission_rules", {})
+        if isinstance(cv_rules, dict) and any(cv_rules.values()):
+            elements.append(Paragraph(f"<b>CV Submission Guidelines:</b> Format: {cv_rules.get('format', '-')} | Signed CVs: {cv_rules.get('signed_cv_required', 'Yes')} | Note: {cv_rules.get('notes', '-')}", body_style))
+            elements.append(Spacer(1, 4))
 
     # Section 8: Deliverables & Milestone Schedule
     deliv = data.get("deliverables_and_milestones", {})
@@ -1843,6 +2048,9 @@ def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output
             excel_boq_data = read_boq_excel(excel_path)
             if excel_boq_data:
                 extracted_json["excel_boq"] = excel_boq_data
+
+        print("[*] Building AI Team Composition & Resource Profiles...")
+        extracted_json["team_and_cv"] = build_ai_team_composition(extracted_json)
 
         print("[*] Running Dual Costing Decision Engine (Client Budget + Code B Solutions Costing)...")
         extracted_json["quotation"] = calculate_quotation(extracted_json)
