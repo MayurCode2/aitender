@@ -677,25 +677,23 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> st
     if not key_to_use:
         raise ValueError("No Gemini API Key provided. Please enter a valid Gemini API Key in the sidebar or set the GEMINI_API_KEY environment variable.")
 
-    try:
-        client = genai.Client(api_key=key_to_use)
-        # Try gemini-3.6-flash primary
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    temperature=0.1
-                )
-            )
-        except Exception as e_mod:
-            if "404" in str(e_mod) or "NOT_FOUND" in str(e_mod):
-                # Fallback to gemini-1.5-flash if 3.6 is unavailable on this key
+    client = genai.Client(api_key=key_to_use)
+
+    # Candidate models in fallback order
+    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.6-flash", "gemini-1.5-pro"]
+    custom_model = os.environ.get("GEMINI_MODEL")
+    if custom_model:
+        if custom_model in candidate_models:
+            candidate_models.remove(custom_model)
+        candidate_models.insert(0, custom_model)
+
+    last_err = None
+
+    for model_name in candidate_models:
+        for attempt in range(1, 4):
+            try:
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash',
+                    model=model_name,
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
@@ -703,19 +701,35 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> st
                         temperature=0.1
                     )
                 )
-            else:
-                raise e_mod
-        if not response or not response.text:
-            raise RuntimeError("Gemini API returned an empty response. Please check your API key permissions.")
-        return response.text
-    except Exception as e:
-        err_str = str(e)
-        if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
-            raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
-        elif "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
-            raise RuntimeError("Gemini API Rate Limit / Quota Exceeded. Please try again later or provide a key with quota.") from e
-        else:
-            raise RuntimeError(f"Gemini API Error: {err_str}") from e
+                if response and response.text:
+                    return response.text
+                else:
+                    raise RuntimeError("Gemini API returned an empty response.")
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+
+                # Invalid Key -> fail fast
+                if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
+                    raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
+
+                # 404 Model Not Found -> try next model immediately
+                if "404" in err_str or "NOT_FOUND" in err_str:
+                    print(f"    [!] Model '{model_name}' not available (404). Trying next model...")
+                    break
+
+                # 503 High Demand / 429 Rate Limit / 500 Server Error -> exponential backoff retry
+                is_transient = any(code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "high demand"])
+                if is_transient:
+                    wait_sec = attempt * 2
+                    print(f"    [!] Gemini '{model_name}' busy/throttled (503/429). Retrying in {wait_sec}s (Attempt {attempt}/3)...")
+                    time.sleep(wait_sec)
+                else:
+                    print(f"    [!] Model '{model_name}' encountered: {err_str[:80]}. Trying next fallback model...")
+                    break
+
+    # If all models and retries exhausted
+    raise RuntimeError(f"Gemini API Error: {last_err}") from last_err
 
 def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict:
     """Executes targeted extraction for a topic using Google Gemini API."""
@@ -775,7 +789,7 @@ def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = N
             merged_data.update(result)
         elif isinstance(result, list):
             merged_data[topic] = result
-        time.sleep(0.4)
+        time.sleep(0.8)
 
     # Regex scan for external URLs (0 tokens)
     print(f"    -> Extracting external links (regex scan, 0 LLM tokens)...")
