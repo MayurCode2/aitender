@@ -679,56 +679,40 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> st
 
     client = genai.Client(api_key=key_to_use)
 
-    # Candidate models in fallback order
-    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.6-flash", "gemini-1.5-pro"]
+    # Exclusively use gemini-3.6-flash without other fallback models or retries
+    candidate_models = ["gemini-3.6-flash"]
     custom_model = os.environ.get("GEMINI_MODEL")
     if custom_model:
-        if custom_model in candidate_models:
-            candidate_models.remove(custom_model)
-        candidate_models.insert(0, custom_model)
+        candidate_models = [custom_model]
 
     last_err = None
 
     for model_name in candidate_models:
-        for attempt in range(1, 4):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        response_mime_type="application/json",
-                        temperature=0.1
-                    )
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    temperature=0.1
                 )
-                if response and response.text:
-                    return response.text
-                else:
-                    raise RuntimeError("Gemini API returned an empty response.")
-            except Exception as e:
-                err_str = str(e)
-                last_err = e
+            )
+            if response and response.text:
+                return response.text
+            else:
+                raise RuntimeError("Gemini API returned an empty response.")
+        except Exception as e:
+            err_str = str(e)
+            last_err = e
 
-                # Invalid Key -> fail fast
-                if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
-                    raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
+            # Invalid Key -> fail fast
+            if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
+                raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
 
-                # 404 Model Not Found -> try next model immediately
-                if "404" in err_str or "NOT_FOUND" in err_str:
-                    print(f"    [!] Model '{model_name}' not available (404). Trying next model...")
-                    break
+            print(f"    [!] Gemini '{model_name}' call failed: {err_str[:120]}")
 
-                # 503 High Demand / 429 Rate Limit / 500 Server Error -> exponential backoff retry
-                is_transient = any(code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "high demand"])
-                if is_transient:
-                    wait_sec = attempt * 2
-                    print(f"    [!] Gemini '{model_name}' busy/throttled (503/429). Retrying in {wait_sec}s (Attempt {attempt}/3)...")
-                    time.sleep(wait_sec)
-                else:
-                    print(f"    [!] Model '{model_name}' encountered: {err_str[:80]}. Trying next fallback model...")
-                    break
-
-    # If all models and retries exhausted
+    # If call failed
     raise RuntimeError(f"Gemini API Error: {last_err}") from last_err
 
 def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict:
