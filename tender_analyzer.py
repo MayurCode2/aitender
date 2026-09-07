@@ -669,8 +669,29 @@ def clean_json_response(raw_text: str, topic_key: str = None) -> dict:
 # SECTION 9: GEMINI LLM CLIENT & EXTRACTION ENGINE
 # ==============================================================================
 
-def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> str:
-    """Invokes Google Gemini API directly."""
+def _is_retryable_error(err_str: str) -> bool:
+    """Checks if a Gemini API error is transient and worth retrying."""
+    retryable_patterns = [
+        "503", "UNAVAILABLE",
+        "429", "RESOURCE_EXHAUSTED", "rate limit",
+        "500", "INTERNAL",
+        "timeout", "timed out",
+        "connection", "ConnectionError",
+        "deadline exceeded",
+    ]
+    err_lower = err_str.lower()
+    return any(p.lower() in err_lower for p in retryable_patterns)
+
+
+def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None, max_retries: int = 3, on_progress = None) -> str:
+    """Invokes Google Gemini API with smart retry, fallback models, & live progress reporting.
+
+    - Retryable errors (503, 429, 500, timeouts): retried up to max_retries times
+      with exponential backoff (2s -> 4s -> 8s).
+    - Fatal errors (invalid API key, 400 bad request): fail immediately.
+    - Automatic fallback: switches to next free Gemini model if primary is exhausted.
+    - on_progress: optional callback(event_type, message, progress=None) for live UI updates.
+    """
     from google import genai
     from google.genai import types
     key_to_use = api_key or os.environ.get("GEMINI_API_KEY")
@@ -679,50 +700,88 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None) -> st
 
     client = genai.Client(api_key=key_to_use)
 
-    # Exclusively use gemini-3.6-flash without other fallback models or retries
-    candidate_models = ["gemini-3.6-flash"]
+    # Primary model with automatic free fallback chain if primary experiences high demand (503/429)
+    candidate_models = [
+        "gemini-3.6-flash",       # Primary — highest quality
+        "gemini-3.5-flash",       # Fallback 1 — good quality
+        "gemini-3.5-flash-lite",  # Fallback 2 — lightweight, fast
+        "gemini-3.1-flash-lite",  # Fallback 3 — lightest, high availability
+    ]
     custom_model = os.environ.get("GEMINI_MODEL")
     if custom_model:
         candidate_models = [custom_model]
 
     last_err = None
+    base_delay = 2  # seconds
 
-    for model_name in candidate_models:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    temperature=0.1
+    for idx, model_name in enumerate(candidate_models):
+        if idx > 0:
+            print(f"    [⚡ Fallback] Trying fallback model '{model_name}' ({idx + 1}/{len(candidate_models)})...")
+        for attempt in range(1 + max_retries):  # attempt 0 = first try, 1..max_retries = retries
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
                 )
-            )
-            if response and response.text:
-                return response.text
-            else:
-                raise RuntimeError("Gemini API returned an empty response.")
-        except Exception as e:
-            err_str = str(e)
-            last_err = e
+                if response and response.text:
+                    if attempt > 0 or idx > 0:
+                        status_parts = []
+                        if attempt > 0:
+                            status_parts.append(f"retry {attempt}/{max_retries}")
+                        if idx > 0:
+                            status_parts.append(f"fallback model {model_name}")
+                        print(f"    [✓] Gemini succeeded ({', '.join(status_parts)}).")
+                        if on_progress:
+                            on_progress("info", f"✓ Gemini call succeeded ({', '.join(status_parts)})")
+                    return response.text
+                else:
+                    raise RuntimeError("Gemini API returned an empty response.")
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
 
-            # Invalid Key -> fail fast
-            if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
-                raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
+                # Fatal errors -> fail fast, no retry or fallback needed
+                if "API_KEY_INVALID" in err_str or ("invalid" in err_str.lower() and "key" in err_str.lower()):
+                    raise RuntimeError("Invalid Gemini API Key. Please verify your Gemini API key in the sidebar.") from e
 
-            print(f"    [!] Gemini '{model_name}' call failed: {err_str[:120]}")
+                if "400" in err_str and "bad request" in err_str.lower():
+                    raise RuntimeError(f"Gemini API Bad Request: {err_str[:200]}") from e
 
-    # If call failed
+                # Check if error is retryable
+                if _is_retryable_error(err_str) and attempt < max_retries:
+                    wait_time = base_delay * (2 ** attempt)  # 2s, 4s, 8s
+                    print(f"    [!] Gemini '{model_name}' attempt {attempt + 1} failed: {err_str[:120]}")
+                    print(f"    [↻ Retry {attempt + 1}/{max_retries}] Waiting {wait_time}s before retrying...")
+                    if on_progress:
+                        on_progress("retry", f"⚠️ High demand / busy on `{model_name}`. Retrying ({attempt + 1}/{max_retries}) in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                # Non-retryable error or retries exhausted for this model
+                print(f"    [!] Gemini '{model_name}' call failed: {err_str[:120]}")
+                if idx < len(candidate_models) - 1:
+                    next_model = candidate_models[idx + 1]
+                    print(f"    [⚡ Fallback] '{model_name}' exhausted, switching to next model...")
+                    if on_progress:
+                        on_progress("fallback", f"⚡ Model `{model_name}` exhausted. Switching to fallback model `{next_model}` ({idx + 2}/{len(candidate_models)})...")
+                break  # exit retry loop, try next model if available
+
+    # All models and retries exhausted
     raise RuntimeError(f"Gemini API Error: {last_err}") from last_err
 
-def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict:
+def execute_topic_pass(topic: str, text_slice: str, api_key: str = None, on_progress = None) -> dict:
     """Executes targeted extraction for a topic using Google Gemini API."""
     prompt_template = TOPIC_PROMPTS.get(topic)
     if not prompt_template:
         return {}
     user_prompt = prompt_template.format(document_text=text_slice)
 
-    raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key)
+    raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key, on_progress=on_progress)
     res = clean_json_response(raw_resp, topic_key=topic)
     return res if isinstance(res, dict) else {topic: res}
 
@@ -730,14 +789,34 @@ def execute_topic_pass(topic: str, text_slice: str, api_key: str = None) -> dict
 # SECTION 10: MULTI-PASS EXTRACTION ORCHESTRATOR
 # ==============================================================================
 
-def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = None) -> dict:
-    """Orchestrates 10 consolidated extraction passes with zero overlap."""
+TOPIC_DISPLAY_NAMES = {
+    "tender_overview": "Tender Overview & Authority Details",
+    "scope_and_tech": "Scope of Work & Technical Stack",
+    "timeline_and_dates": "Key Dates, Milestones & Deadlines",
+    "submission_and_prebid": "Submission Mode & Pre-Bid Guidelines",
+    "eligibility_and_experience": "Eligibility Criteria & Financial Capacity",
+    "required_documents_and_stamp": "Mandatory Documents & Stamp Papers",
+    "team_and_cv": "Key Personnel & Qualification Criteria",
+    "deliverables_and_milestones": "Deliverables, SLA & Payment Milestones",
+    "presentation_and_demo": "Presentation, Demo & Evaluation Scoring",
+    "annexures_list": "Forms, Declarations & Annexures Checklist",
+    "commercial_and_boq": "Commercial BOQ & Financial Schedule",
+}
+
+def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = None, on_progress = None) -> dict:
+    """Orchestrates consolidated extraction passes with zero overlap and live progress callbacks."""
+    if on_progress:
+        on_progress("step", "Reading and scanning document pages locally...", 0.05)
+
     pages = extract_pages_from_pdf(pdf_input)
     total_pages = len(pages)
     total_chars = sum(len(p) for p in pages)
 
     print(f"[*] Scanned {total_pages} pages locally ({total_chars:,} chars) [Zero token cost]")
     print(f"[*] Resolving topic pages via 4-Layer Universal Discovery Engine...")
+
+    if on_progress:
+        on_progress("step", f"Indexed {total_pages} pages ({total_chars:,} chars). Resolving 4-Layer Discovery Engine...", 0.10)
 
     topic_page_map = resolve_universal_topic_pages(pages)
 
@@ -759,24 +838,37 @@ def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = N
 
     merged_data = {}
     total_slice_chars = 0
+    total_passes = len(passes)
 
-    for topic in passes:
+    for idx, topic in enumerate(passes):
         page_nums = topic_page_map.get(topic, [0, 1])
         parts = [f"--- [PAGE {p + 1}] ---\n{pages[p].strip()}" for p in page_nums if p < total_pages]
         text_slice = "\n\n".join(parts)
         total_slice_chars += len(text_slice)
         page_labels = ", ".join(f"P.{p+1}" for p in page_nums)
+        topic_title = TOPIC_DISPLAY_NAMES.get(topic, topic.replace("_", " ").title())
         print(f"    -> Extracting '{topic}' from [{page_labels}] ({len(text_slice):,} chars)...")
 
-        result = execute_topic_pass(topic, text_slice, api_key=api_key)
+        # Progress range for topics: 0.15 to 0.75
+        topic_progress = 0.15 + (idx / total_passes) * 0.60
+        if on_progress:
+            on_progress("topic_start", f"[{idx + 1}/{total_passes}] Extracting {topic_title} from [{page_labels}] ({len(text_slice):,} chars)...", topic_progress)
+
+        result = execute_topic_pass(topic, text_slice, api_key=api_key, on_progress=on_progress)
         if isinstance(result, dict):
             merged_data.update(result)
         elif isinstance(result, list):
             merged_data[topic] = result
+
+        topic_done_progress = 0.15 + ((idx + 1) / total_passes) * 0.60
+        if on_progress:
+            on_progress("topic_done", f"✓ [{idx + 1}/{total_passes}] Extracted: {topic_title}", topic_done_progress)
         time.sleep(0.8)
 
     # Regex scan for external URLs (0 tokens)
     print(f"    -> Extracting external links (regex scan, 0 LLM tokens)...")
+    if on_progress:
+        on_progress("step", "Scanning for external links and submission portals...", 0.76)
     merged_data["external_links"] = extract_external_links(pages)
 
     token_savings = ((total_chars - total_slice_chars) / max(1, total_chars)) * 100
@@ -2022,8 +2114,8 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
 # SECTION 14: EXECUTION ORCHESTRATOR & CLI ENTRYPOINT
 # ==============================================================================
 
-def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output_dir: Path = None):
-    """Processes single or multiple PDF proposals with optional Excel BOQ file."""
+def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output_dir: Path = None, on_progress = None):
+    """Processes single or multiple PDF proposals with optional Excel BOQ file and live progress reporting."""
     if isinstance(pdf_input, (list, tuple)):
         pdf_paths = [Path(p) for p in pdf_input]
         primary_pdf = pdf_paths[0]
@@ -2040,29 +2132,44 @@ def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output
     print(f"==========================================")
     try:
         has_excel = bool(excel_path and excel_path.exists())
-        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel, api_key=api_key)
+        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel, api_key=api_key, on_progress=on_progress)
 
         if has_excel:
+            if on_progress:
+                on_progress("step", f"Parsing BOQ Excel: {excel_path.name}...", 0.78)
             excel_boq_data = read_boq_excel(excel_path)
             if excel_boq_data:
                 extracted_json["excel_boq"] = excel_boq_data
 
+        if on_progress:
+            on_progress("step", "Building AI Team Composition & Resource Profiles...", 0.82)
         print("[*] Building AI Team Composition & Resource Profiles...")
         extracted_json["team_and_cv"] = build_ai_team_composition(extracted_json)
 
+        if on_progress:
+            on_progress("step", "Running Dual Costing Decision Engine (Client Budget + Code B Solutions Costing)...", 0.86)
         print("[*] Running Dual Costing Decision Engine (Client Budget + Code B Solutions Costing)...")
         extracted_json["quotation"] = calculate_quotation(extracted_json)
 
+        if on_progress:
+            on_progress("step", "Building Consolidated Submission Document Checklist...", 0.90)
         print("[*] Building Consolidated Submission Document Checklist...")
         extracted_json["submission_checklist"] = build_submission_checklist(extracted_json)
 
+        if on_progress:
+            on_progress("step", "Generating Tailored Presentation Strategy (Code B Solutions Pvt. Ltd.)...", 0.93)
         print("[*] Generating Tailored Presentation Strategy (Code B Solutions Pvt. Ltd.)...")
         extracted_json["presentation_strategy"] = generate_presentation_strategy(extracted_json)
 
+        if on_progress:
+            on_progress("step", "Rendering Executive Summary PDF Report with ReportLab...", 0.96)
         target_out_dir = Path(output_dir) if output_dir else OUTPUT_DIR
         target_out_dir.mkdir(exist_ok=True, parents=True)
         out_pdf = target_out_dir / f"{primary_pdf.stem}_summary.pdf"
         build_output_pdf(extracted_json, out_pdf)
+
+        if on_progress:
+            on_progress("complete", "Tender Analysis & Executive Summary Report Complete!", 1.0)
 
     except Exception as e:
         import traceback
