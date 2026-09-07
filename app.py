@@ -165,51 +165,65 @@ if uploaded_pdfs:
 
         st.subheader("🔄 Processing Pipeline")
         progress_bar = st.progress(0)
-        status_text = st.empty()
 
-        status_text.text("1/4 Loading PDF(s) & Initializing 4-Layer Zero-Token Discovery Engine...")
-        progress_bar.progress(25)
+        with st.status("🚀 Initializing Tender Analysis...", expanded=True) as status_box:
+            def ui_progress_callback(event_type: str, message: str, progress: float = None):
+                if progress is not None:
+                    progress_bar.progress(min(1.0, max(0.0, float(progress))))
 
-        # Import analyzer dynamically
-        from tender_analyzer import process_pair, OUTPUT_DIR
+                if event_type == "retry":
+                    st.warning(message, icon="⏳")
+                elif event_type == "fallback":
+                    st.info(message, icon="⚡")
+                elif event_type == "topic_done":
+                    st.write(message)
+                elif event_type == "topic_start":
+                    status_box.update(label=f"🔄 {message}")
+                    st.write(f"• {message}")
+                elif event_type == "complete":
+                    status_box.update(label="✅ Analysis & Executive Report Ready!", state="complete")
+                    st.write(f"🎉 **{message}**")
+                elif event_type == "info":
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;_{message}_")
+                else:
+                    status_box.update(label=f"⚙️ {message}")
+                    st.write(f"• {message}")
 
-        try:
-            status_text.text("2/4 Executing Multi-Pass AI Extraction (Google Gemini API)...")
-            progress_bar.progress(50)
-            
-            # Run processing engine
-            process_pair(pdf_paths, excel_path, api_key=active_key)
+            # Import analyzer dynamically
+            from tender_analyzer import process_pair, OUTPUT_DIR
 
-            progress_bar.progress(85)
-            status_text.text("3/4 Building Executive PDF Summary Report with ReportLab...")
-            
-            primary_stem = pdf_paths[0].stem
-            output_pdf_path = OUTPUT_DIR / f"{primary_stem}_summary.pdf"
+            try:
+                # Run processing engine with live progress callback
+                process_pair(pdf_paths, excel_path, api_key=active_key, on_progress=ui_progress_callback)
 
-            if output_pdf_path.exists():
-                progress_bar.progress(100)
-                status_text.text("4/4 Done!")
-                st.balloons()
+                primary_stem = pdf_paths[0].stem
+                output_pdf_path = OUTPUT_DIR / f"{primary_stem}_summary.pdf"
 
-                st.markdown(f'<div class="success-card">✅ <b>Tender Analysis Completed Successfully!</b><br>Executive report generated: <code>{output_pdf_path.name}</code></div>', unsafe_allow_html=True)
+                if output_pdf_path.exists():
+                    progress_bar.progress(1.0)
+                    status_box.update(label="✅ Tender Analysis Completed Successfully!", state="complete", expanded=False)
+                    st.balloons()
 
-                with open(output_pdf_path, "rb") as pdf_file:
-                    pdf_bytes = pdf_file.read()
-                    
-                st.download_button(
-                    label="📥 Download Executive Summary PDF Report",
-                    data=pdf_bytes,
-                    file_name=output_pdf_path.name,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-            else:
-                st.error("❌ Could not find output PDF. Please check server logs.")
-                
-        except Exception as e:
-            progress_bar.progress(100)
-            status_text.empty()
-            st.error(f"❌ **Gemini API / Analysis Error:** {e}")
-            st.warning("💡 **Troubleshooting Tips:**\n- Verify that your Gemini API Key entered in the sidebar is valid.\n- Check if your Google AI Studio quota / rate limit has been exceeded.\n- Ensure your network connection can access Google Gemini services.")
+                    st.markdown(f'<div class="success-card">✅ <b>Tender Analysis Completed Successfully!</b><br>Executive report generated: <code>{output_pdf_path.name}</code></div>', unsafe_allow_html=True)
+
+                    with open(output_pdf_path, "rb") as pdf_file:
+                        pdf_bytes = pdf_file.read()
+
+                    st.download_button(
+                        label="📥 Download Executive Summary PDF Report",
+                        data=pdf_bytes,
+                        file_name=output_pdf_path.name,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                else:
+                    status_box.update(label="❌ Report generation failed", state="error")
+                    st.error("❌ Could not find output PDF. Please check server logs.")
+
+            except Exception as e:
+                progress_bar.progress(1.0)
+                status_box.update(label="❌ Analysis Stopped Due to Error", state="error", expanded=True)
+                st.error(f"❌ **Gemini API / Analysis Error:** {e}")
+                st.warning("💡 **Troubleshooting Tips:**\n- Verify that your Gemini API Key entered in the sidebar is valid.\n- Check if your Google AI Studio quota / rate limit has been exceeded.\n- Ensure your network connection can access Google Gemini services.")
 else:
     st.info("💡 Please upload a Tender PDF above to get started.")
