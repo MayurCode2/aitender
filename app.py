@@ -3,6 +3,9 @@ import sys
 import time
 from pathlib import Path
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Setup base input & output directory constants
 INPUT_DIR = Path("input")
@@ -85,15 +88,93 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/analytical-skills.png", width=70)
     st.header("⚙️ Configuration")
     
-    has_env_key = bool(os.environ.get("GEMINI_API_KEY"))
-    api_key_input = st.text_input("Gemini API Key", value="", type="password", placeholder="Enter your Gemini API Key...", help="Leave blank if pre-configured on server")
-    
-    if api_key_input:
-        st.success("✅ Custom Gemini API Key provided")
-    elif has_env_key:
-        st.success("✅ API Key loaded securely from Server Environment")
+    # AI Provider Selection
+    provider_name = st.selectbox(
+        "🤖 AI Provider",
+        options=["OpenAI", "Google Gemini"],
+        index=0,
+        help="Select the AI engine provider to analyze the tender document."
+    )
+    is_openai = provider_name == "OpenAI"
+
+    # Model Selection Dropdown
+    if is_openai:
+        openai_models = [
+            "gpt-4o-mini (Recommended - Fast & Cost-Efficient)",
+            "gpt-4o (Flagship - High Intelligence)",
+            "gpt-4-turbo",
+            "o3-mini (Advanced Reasoning)",
+            "gpt-3.5-turbo",
+            "Custom Model..."
+        ]
+        selected_model_choice = st.selectbox(
+            "🧠 Select Model",
+            options=openai_models,
+            index=0,
+            help="Choose the OpenAI model to run the analysis."
+        )
+        if selected_model_choice == "Custom Model...":
+            selected_model = st.text_input("Custom OpenAI Model Name", value="", placeholder="e.g. gpt-4o-2024-08-06").strip()
+            if not selected_model:
+                selected_model = "gpt-4o-mini"
+        else:
+            selected_model = selected_model_choice.split(" ")[0].strip()
+
+        # OpenAI API Key Input
+        has_env_key = bool(os.environ.get("OPENAI_API_KEY"))
+        api_key_input = st.text_input(
+            "OpenAI API Key",
+            value="",
+            type="password",
+            placeholder="sk-proj-...",
+            help="Leave blank if pre-configured in .env on server"
+        )
+
+        if api_key_input.strip():
+            st.success("✅ Custom OpenAI API Key provided")
+        elif has_env_key:
+            st.success("✅ OpenAI Key loaded from Server (.env)")
+        else:
+            st.warning("⚠️ No OpenAI API Key found. Paste key above or configure .env.")
+
     else:
-        st.warning("⚠️ No Gemini API Key found. Paste key above or configure server secrets.")
+        gemini_models = [
+            "gemini-2.5-flash (Recommended - Fast & Accurate)",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.5-pro",
+            "Custom Model..."
+        ]
+        selected_model_choice = st.selectbox(
+            "🧠 Select Model",
+            options=gemini_models,
+            index=0,
+            help="Choose the Google Gemini model to run the analysis."
+        )
+        if selected_model_choice == "Custom Model...":
+            selected_model = st.text_input("Custom Gemini Model Name", value="", placeholder="e.g. gemini-2.5-flash").strip()
+            if not selected_model:
+                selected_model = "gemini-2.5-flash"
+        else:
+            selected_model = selected_model_choice.split(" ")[0].strip()
+
+        # Gemini API Key Input
+        has_env_key = bool(os.environ.get("GEMINI_API_KEY"))
+        api_key_input = st.text_input(
+            "Gemini API Key",
+            value="",
+            type="password",
+            placeholder="Enter your Gemini API Key...",
+            help="Leave blank if pre-configured in .env on server"
+        )
+
+        if api_key_input.strip():
+            st.success("✅ Custom Gemini API Key provided")
+        elif has_env_key:
+            st.success("✅ Gemini Key loaded from Server (.env)")
+        else:
+            st.warning("⚠️ No Gemini API Key found. Paste key above or configure .env.")
         
     st.divider()
     st.markdown("### 📊 Features")
@@ -143,9 +224,16 @@ if uploaded_pdfs:
         
     if st.button("🚀 Run AI Tender Analysis"):
         active_key = api_key_input.strip() if api_key_input else None
-        if not active_key and not os.environ.get("GEMINI_API_KEY"):
-            st.error("❌ **Gemini API Key Missing!** Please paste your Gemini API key in the sidebar configuration to run the analysis.")
-            st.stop()
+        active_provider = "openai" if is_openai else "gemini"
+
+        if is_openai:
+            if not active_key and not os.environ.get("OPENAI_API_KEY"):
+                st.error("❌ **OpenAI API Key Missing!** Please paste your OpenAI API key in the sidebar configuration to run the analysis.")
+                st.stop()
+        else:
+            if not active_key and not os.environ.get("GEMINI_API_KEY"):
+                st.error("❌ **Gemini API Key Missing!** Please paste your Gemini API key in the sidebar configuration to run the analysis.")
+                st.stop()
 
         # Auto-clean previous files before saving new ones
         cleanup_old_files()
@@ -166,7 +254,7 @@ if uploaded_pdfs:
         st.subheader("🔄 Processing Pipeline")
         progress_bar = st.progress(0)
 
-        with st.status("🚀 Initializing Tender Analysis...", expanded=True) as status_box:
+        with st.status(f"🚀 Initializing Tender Analysis with {provider_name} ({selected_model})...", expanded=True) as status_box:
             def ui_progress_callback(event_type: str, message: str, progress: float = None):
                 if progress is not None:
                     progress_bar.progress(min(1.0, max(0.0, float(progress))))
@@ -194,7 +282,14 @@ if uploaded_pdfs:
 
             try:
                 # Run processing engine with live progress callback
-                process_pair(pdf_paths, excel_path, api_key=active_key, on_progress=ui_progress_callback)
+                process_pair(
+                    pdf_paths,
+                    excel_path,
+                    api_key=active_key,
+                    provider=active_provider,
+                    model=selected_model,
+                    on_progress=ui_progress_callback
+                )
 
                 primary_stem = pdf_paths[0].stem
                 output_pdf_path = OUTPUT_DIR / f"{primary_stem}_summary.pdf"
@@ -223,7 +318,10 @@ if uploaded_pdfs:
             except Exception as e:
                 progress_bar.progress(1.0)
                 status_box.update(label="❌ Analysis Stopped Due to Error", state="error", expanded=True)
-                st.error(f"❌ **Gemini API / Analysis Error:** {e}")
-                st.warning("💡 **Troubleshooting Tips:**\n- Verify that your Gemini API Key entered in the sidebar is valid.\n- Check if your Google AI Studio quota / rate limit has been exceeded.\n- Ensure your network connection can access Google Gemini services.")
+                st.error(f"❌ **{provider_name} API / Analysis Error:** {e}")
+                if is_openai:
+                    st.warning("💡 **Troubleshooting Tips:**\n- Verify that your OpenAI API Key entered in the sidebar is valid (starts with `sk-`).\n- Check if your OpenAI account billing / credits are active at platform.openai.com.\n- Check if the selected model is supported by your API key tier.")
+                else:
+                    st.warning("💡 **Troubleshooting Tips:**\n- Verify that your Gemini API Key entered in the sidebar is valid.\n- Check if your Google AI Studio quota / rate limit has been exceeded.\n- Ensure your network connection can access Google Gemini services.")
 else:
     st.info("💡 Please upload a Tender PDF above to get started.")
