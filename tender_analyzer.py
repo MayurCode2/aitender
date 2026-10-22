@@ -168,21 +168,68 @@ DOCUMENT TEXT:
 {document_text}
 ---""",
 
-    "scope_and_tech": """Extract the complete Scope of Work, Technical Requirements, and Technology Solution Type.
+    "scope_and_tech": """Extract the complete, in-depth Scope of Work, Core Architectural Components, Features, Field App Requirements, AI Layer, and Implementation Stages from the provided tender document text.
+Extract verbatim, exhaustive details and all named components/modules. DO NOT guess or assume generic tech (like React, Node.js, AWS) if they are not explicitly written in the document.
+
 Return ONLY valid JSON:
 {{
   "scope_and_tech": {{
-    "summary": "<2-3 sentence executive overview of the project scope>",
-    "primary_category": "<Web Application / Mobile App / AI Solution / Cloud / ERP / Portal>",
+    "summary": "<Comprehensive 3-4 sentence executive overview of the project scope, background, and operational context>",
+    "primary_category": "<Web Application / Mobile App / AI Solution / Cloud / Geospatial / Portal>",
     "all_categories": ["<Category 1>", "<Category 2>"],
-    "platform": "<Web / Android / iOS / Cloud / Hybrid>",
-    "functional_requirements": ["<Functional requirement 1>", "<Functional requirement 2>"],
-    "technical_requirements": ["<Technical requirement 1>", "<Technical requirement 2>"],
-    "specific_technologies": ["<Specific technology / stack / framework mentioned>"],
-    "integration_requirements": ["<API / Payment / SMS / 3rd Party Integrations>"],
-    "security_and_compliance": ["<Security / VAPT / WCAG / ISO Compliance requirements>"],
-    "maintenance_and_support": ["<AMC / SLA / Post-go-live maintenance terms>"],
-    "deliverables_summary": ["<Key software / documentation deliverables>"]
+    "platform": "<Web Portal / Android App / iOS App / Cloud Hosting / Offline-first>",
+    "core_components": [
+      {{
+        "component": "<e.g. Component A — Master Web Portal>",
+        "one_line_summary": "<Short summary of component>",
+        "key_features": ["<Feature 1>", "<Feature 2>", "<Feature 3>"]
+      }}
+    ],
+    "ai_ml_specifications": {{
+      "model_type": "<e.g. Open-source LLM (Qwen, GLM, Llama, DeepSeek) hosted locally on Govt infrastructure>",
+      "hosting_and_privacy": "<Local Govt infrastructure in India, no commercial external inference APIs>",
+      "role": "<Synthesise multi-source weather readings, explain Go/No-Go colour advisory in English & Odia, continuous learning>",
+      "feedback_loop": "<Daily end-of-day feedback prompt in Odia to field staff for real-time validation and model re-tuning>"
+    }},
+    "weather_and_data_sources": [
+      "<Weather sources e.g. Tier 1 IMD nowcasts/warnings, Tier 2 Open-Meteo/ECMWF/GFS/ICON, Tier 3 Enterprise APIs>"
+    ],
+    "field_mobile_app_features": [
+      "<Low-cost handsets (Android 9+, iOS 14+, 2GB RAM, <60MB), offline caching, Odia language default, sunlight high-contrast mode, shared handset user swapping>"
+    ],
+    "dissemination_channels": [
+      "<WhatsApp Enterprise API (Odia color-coded image cards), SMS via Indian carrier with TRAI DLT headers, IVR toll-free broadcast>"
+    ],
+    "geospatial_and_gis": [
+      "<Bhuvan NRSC / Survey of India base mapping, switchable jurisdiction layers, GPS Phadi mapping>"
+    ],
+    "implementation_stages": [
+      "<Stages e.g. Stage 1 Study & Design, Stage 2 Build & Test, Stage 3 Balangir Pilot 15 days, Stage 4 Statewide Rollout by 15 Feb 2027, Stage 5 48m Operation (12m warranty + 36m paid AMC)>"
+    ],
+    "functional_requirements": [
+      "<Detailed functional requirement 1>",
+      "<Detailed functional requirement 2>",
+      "<Detailed functional requirement 3>"
+    ],
+    "technical_requirements": [
+      "<Architecture: Modular, independent services>",
+      "<Hosting: Inside India, Odisha State Data Centre (OSDC) or MeitY cloud>",
+      "<Inference infrastructure: Local Govt infrastructure inside India>",
+      "<Capacity: 5,000 peak concurrent users, 10,000 peak scalable, 25,000 registered accounts>",
+      "<Availability: 99.9% uptime (Feb-Jul) and 99.5% rest of year, 4hr RTO, 15min RPO>"
+    ],
+    "specific_technologies": ["<Specific technologies, frameworks, APIs explicitly named in document>"],
+    "integration_requirements": ["<Specific integrations required: IMD REST/FTP, WhatsApp API, SMS DLT, Bhuvan GIS>"],
+    "security_and_compliance": [
+      "<CERT-In audit clean certificate annually>",
+      "<Digital Personal Data Protection Act 2023, IT Act 2000, GIGW 3.0>",
+      "<All source code, AI models, and data owned 100% by Government>"
+    ],
+    "maintenance_and_support": [
+      "<12 months warranty included in capital cost, followed by 36 months paid AMC>",
+      "<Helpdesk in Odia, Hindi, English, 250 person-days change effort per year>"
+    ],
+    "deliverables_summary": ["<Key deliverables summary>"]
   }}
 }}
 
@@ -543,12 +590,49 @@ def score_pages_semantic(pages: List[str]) -> Dict[str, List[int]]:
 # SECTION 7: LAYER 3 & 4 - 4-LAYER HYBRID DISCOVERY RESOLVER
 # ==============================================================================
 
+def detect_section_spans(pages: List[str]) -> Dict[str, List[int]]:
+    """Detects continuous multi-page section spans based on explicit RFP section headings."""
+    total_pages = len(pages)
+    SECTION_START_PATTERNS = [
+        ("scope_and_tech", r'(?:^|\n)\s*(?:(?:section|chapter|part)\s*[0-9ivx]+[:.\-\s]+|[0-9]{1,2}\.\s+)?(?:scope of work|terms of reference|schedule of requirements|functional specifications|scope of the project|description of work|technical specifications)'),
+        ("deliverables_and_milestones", r'(?:^|\n)\s*(?:(?:section|chapter|part)\s*[0-9ivx]+[:.\-\s]+|[0-9]{1,2}\.\s+)?(?:deliverables[,\s&]+milestones|milestones and acceptance|schedule of deliverables|milestone payment|key deliverables)'),
+        ("commercial_and_boq", r'(?:^|\n)\s*(?:(?:section|chapter|part)\s*[0-9ivx]+[:.\-\s]+|[0-9]{1,2}\.\s+)?(?:financial bid format|price schedule|bill of quantities|boq format|financial proposal|commercial bid)'),
+        ("eligibility_and_experience", r'(?:^|\n)\s*(?:(?:section|chapter|part)\s*[0-9ivx]+[:.\-\s]+|[0-9]{1,2}\.\s+)?(?:eligibility criteria|qualifying criteria|pre-qualification criteria|technical evaluation criteria|minimum qualification)'),
+        ("submission_and_prebid", r'(?:^|\n)\s*(?:(?:section|chapter|part)\s*[0-9ivx]+[:.\-\s]+|[0-9]{1,2}\.\s+)?(?:instructions to bidders|submission of bid|bid submission protocol|submission guidelines)'),
+    ]
+
+    detected_starts = []
+    for idx, page in enumerate(pages):
+        for topic, pat in SECTION_START_PATTERNS:
+            if re.search(pat, page, re.IGNORECASE):
+                if not any(d[0] == topic for d in detected_starts):
+                    detected_starts.append((topic, idx))
+
+    detected_starts.sort(key=lambda x: x[1])
+
+    section_spans = {}
+    for i, (topic, start_page) in enumerate(detected_starts):
+        if i + 1 < len(detected_starts):
+            next_start = detected_starts[i + 1][1]
+            end_page = min(next_start, start_page + 12)
+        else:
+            end_page = min(total_pages, start_page + 10)
+        if end_page > start_page:
+            section_spans[topic] = list(range(start_page, end_page))
+
+    return section_spans
+
 def resolve_universal_topic_pages(pages: List[str]) -> Dict[str, List[int]]:
     """Orchestrates 4-Layer discovery to identify optimal page mappings per topic."""
     total_pages = len(pages)
     if total_pages <= 4:
         all_p = list(range(total_pages))
         return {t: all_p for t in TOPIC_KEYWORDS}
+
+    # Layer 0: Structural Section Span Locator
+    section_spans = detect_section_spans(pages)
+    if section_spans:
+        print(f"    [+] Structural Section Span Resolver identified {len(section_spans)} continuous section(s).")
 
     # Layer 1: TOC Parser
     toc_map = parse_table_of_contents(pages)
@@ -584,8 +668,13 @@ def resolve_universal_topic_pages(pages: List[str]) -> Dict[str, List[int]]:
         layer_pages = []
         if topic in ["tender_overview", "timeline_and_dates", "submission_and_prebid"]:
             layer_pages.extend([0, 1, 2])  # Cover/NIT pages always contain critical date schedules & bid opening info
-        if topic in toc_map and toc_map[topic]:
-            layer_pages.extend(toc_map[topic][:3])
+
+        # Priority 1: Use detected structural section span if available
+        if topic in section_spans and section_spans[topic]:
+            layer_pages.extend(section_spans[topic])
+        elif topic in toc_map and toc_map[topic]:
+            layer_pages.extend(toc_map[topic][:4])
+
         if topic in semantic_map and semantic_map[topic]:
             layer_pages.extend(semantic_map[topic][:2])
         if topic in keyword_map and keyword_map[topic]:
@@ -594,12 +683,13 @@ def resolve_universal_topic_pages(pages: List[str]) -> Dict[str, List[int]]:
         if not layer_pages:
             layer_pages = [0, 1]
 
-        # Preserve order and limit to top 4 pages
+        # Scope of work spans up to 12 pages; other topics up to 6 pages
+        max_topic_pages = 12 if topic == "scope_and_tech" else 6
         unique_pages = []
         for p in layer_pages:
             if p not in unique_pages and 0 <= p < total_pages:
                 unique_pages.append(p)
-            if len(unique_pages) >= 4:
+            if len(unique_pages) >= max_topic_pages:
                 break
 
         final_map[topic] = sorted(unique_pages)
@@ -683,7 +773,7 @@ def _is_retryable_error(err_str: str) -> bool:
     return any(p.lower() in err_lower for p in retryable_patterns)
 
 
-def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None, max_retries: int = 3, on_progress = None) -> str:
+def call_gemini(system_prompt: str, user_prompt: str, model: str = None, api_key: str = None, max_retries: int = 3, on_progress = None) -> str:
     """Invokes Google Gemini API with smart retry, fallback models, & live progress reporting.
 
     - Retryable errors (503, 429, 500, timeouts): retried up to max_retries times
@@ -701,15 +791,18 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None, max_r
     client = genai.Client(api_key=key_to_use)
 
     # Primary model with automatic free fallback chain if primary experiences high demand (503/429)
-    candidate_models = [
-        "gemini-3.6-flash",       # Primary — highest quality
-        "gemini-3.5-flash",       # Fallback 1 — good quality
-        "gemini-3.5-flash-lite",  # Fallback 2 — lightweight, fast
-        "gemini-3.1-flash-lite",  # Fallback 3 — lightest, high availability
+    default_models = [
+        "gemini-2.5-flash",       # Primary — high quality & fast
+        "gemini-2.0-flash",       # Fallback 1 — fast
+        "gemini-1.5-flash",       # Fallback 2 — stable
+        "gemini-1.5-pro",         # Fallback 3 — high reasoning
     ]
-    custom_model = os.environ.get("GEMINI_MODEL")
-    if custom_model:
-        candidate_models = [custom_model]
+    if model:
+        candidate_models = [model] + [m for m in default_models if m != model]
+    elif os.environ.get("GEMINI_MODEL"):
+        candidate_models = [os.environ.get("GEMINI_MODEL")] + [m for m in default_models if m != os.environ.get("GEMINI_MODEL")]
+    else:
+        candidate_models = default_models
 
     last_err = None
     base_delay = 2  # seconds
@@ -774,14 +867,110 @@ def call_gemini(system_prompt: str, user_prompt: str, api_key: str = None, max_r
     # All models and retries exhausted
     raise RuntimeError(f"Gemini API Error: {last_err}") from last_err
 
-def execute_topic_pass(topic: str, text_slice: str, api_key: str = None, on_progress = None) -> dict:
-    """Executes targeted extraction for a topic using Google Gemini API."""
+
+def _is_openai_retryable(err_str: str) -> bool:
+    """Checks if an OpenAI API error is transient and worth retrying."""
+    retryable_patterns = [
+        "503", "502", "504", "500", "internal server error",
+        "429", "rate limit", "rate_limit",
+        "timeout", "timed out", "connection", "apiconnectionerror",
+        "service unavailable", "bad gateway"
+    ]
+    err_lower = err_str.lower()
+    if "insufficient_quota" in err_lower or "quota" in err_lower:
+        return False
+    return any(p in err_lower for p in retryable_patterns)
+
+
+def call_openai(system_prompt: str, user_prompt: str, model: str = None, api_key: str = None, max_retries: int = 3, on_progress = None) -> str:
+    """Invokes OpenAI API with smart retry, structured JSON output, and live progress reporting."""
+    from openai import OpenAI, AuthenticationError
+    key_to_use = api_key or os.environ.get("OPENAI_API_KEY")
+    if not key_to_use:
+        raise ValueError("No OpenAI API Key provided. Please enter a valid OpenAI API Key in the sidebar or set the OPENAI_API_KEY environment variable.")
+
+    client = OpenAI(api_key=key_to_use)
+    model_name = model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+
+    base_delay = 2  # seconds
+    last_err = None
+
+    for attempt in range(1 + max_retries):
+        try:
+            is_reasoning = any(model_name.lower().startswith(p) for p in ["o1", "o3"])
+            if is_reasoning:
+                messages = [
+                    {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
+                ]
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    response_format={"type": "json_object"}
+                )
+            else:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+
+            if response and response.choices and response.choices[0].message.content:
+                content = response.choices[0].message.content
+                if attempt > 0:
+                    print(f"    [✓] OpenAI succeeded (retry {attempt}/{max_retries}).")
+                    if on_progress:
+                        on_progress("info", f"✓ OpenAI call succeeded (retry {attempt}/{max_retries})")
+                return content
+            else:
+                raise RuntimeError("OpenAI API returned an empty response.")
+
+        except AuthenticationError as e:
+            raise RuntimeError("Invalid OpenAI API Key. Please verify your OpenAI API key in the sidebar.") from e
+        except Exception as e:
+            err_str = str(e)
+            last_err = e
+
+            if "insufficient_quota" in err_str.lower() or "exceeded your current quota" in err_str.lower():
+                raise RuntimeError("OpenAI API Quota Exceeded. Please check your OpenAI account billing.") from e
+
+            if "invalid_api_key" in err_str.lower():
+                raise RuntimeError("Invalid OpenAI API Key. Please verify your OpenAI API key in the sidebar.") from e
+
+            if _is_openai_retryable(err_str) and attempt < max_retries:
+                wait_time = base_delay * (2 ** attempt)
+                print(f"    [!] OpenAI '{model_name}' attempt {attempt + 1} failed: {err_str[:120]}")
+                print(f"    [↻ Retry {attempt + 1}/{max_retries}] Waiting {wait_time}s before retrying...")
+                if on_progress:
+                    on_progress("retry", f"⚠️ High traffic / rate-limited on `{model_name}`. Retrying ({attempt + 1}/{max_retries}) in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+
+            break
+
+    raise RuntimeError(f"OpenAI API Error ({model_name}): {last_err}") from last_err
+
+
+def call_llm(system_prompt: str, user_prompt: str, api_key: str = None, provider: str = "gemini", model: str = None, max_retries: int = 3, on_progress = None) -> str:
+    """Dispatches LLM calls to either Google Gemini or OpenAI based on provider."""
+    p = (provider or "gemini").strip().lower()
+    if p in ["openai", "open_ai"]:
+        return call_openai(system_prompt=system_prompt, user_prompt=user_prompt, model=model, api_key=api_key, max_retries=max_retries, on_progress=on_progress)
+    return call_gemini(system_prompt=system_prompt, user_prompt=user_prompt, model=model, api_key=api_key, max_retries=max_retries, on_progress=on_progress)
+
+
+def execute_topic_pass(topic: str, text_slice: str, api_key: str = None, provider: str = "gemini", model: str = None, on_progress = None) -> dict:
+    """Executes targeted extraction for a topic using the selected LLM provider and model."""
     prompt_template = TOPIC_PROMPTS.get(topic)
     if not prompt_template:
         return {}
     user_prompt = prompt_template.format(document_text=text_slice)
 
-    raw_resp = call_gemini(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key, on_progress=on_progress)
+    raw_resp = call_llm(LLM_SYSTEM_PROMPT, user_prompt, api_key=api_key, provider=provider, model=model, on_progress=on_progress)
     res = clean_json_response(raw_resp, topic_key=topic)
     return res if isinstance(res, dict) else {topic: res}
 
@@ -803,7 +992,7 @@ TOPIC_DISPLAY_NAMES = {
     "commercial_and_boq": "Commercial BOQ & Financial Schedule",
 }
 
-def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = None, on_progress = None) -> dict:
+def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = None, provider: str = "gemini", model: str = None, on_progress = None) -> dict:
     """Orchestrates consolidated extraction passes with zero overlap and live progress callbacks."""
     if on_progress:
         on_progress("step", "Reading and scanning document pages locally...", 0.05)
@@ -854,7 +1043,7 @@ def run_multi_pass_analysis(pdf_input, has_excel: bool = False, api_key: str = N
         if on_progress:
             on_progress("topic_start", f"[{idx + 1}/{total_passes}] Extracting {topic_title} from [{page_labels}] ({len(text_slice):,} chars)...", topic_progress)
 
-        result = execute_topic_pass(topic, text_slice, api_key=api_key, on_progress=on_progress)
+        result = execute_topic_pass(topic, text_slice, api_key=api_key, provider=provider, model=model, on_progress=on_progress)
         if isinstance(result, dict):
             merged_data.update(result)
         elif isinstance(result, list):
@@ -1778,6 +1967,68 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
         if t_meta:
             elements.extend([t_meta, Spacer(1, 3)])
 
+        # 2A. Core Architectural Components & Work Breakdown Table
+        core_comps = scope.get("core_components", [])
+        if isinstance(core_comps, list) and core_comps:
+            elements.append(Paragraph("<b>A. Core Architectural Components & Scope Breakdown:</b>", body_style))
+            comp_rows = [["#", "Component / Module", "Scope Description & Key Capabilities"]]
+            for idx, c in enumerate(core_comps):
+                if isinstance(c, dict):
+                    c_name = c.get("component", f"Component {idx + 1}")
+                    c_summary = c.get("one_line_summary", "")
+                    c_feats = c.get("key_features", [])
+                    feat_str = ""
+                    if c_feats and isinstance(c_feats, list):
+                        feat_str = "<br/>• " + "<br/>• ".join(str(f) for f in c_feats[:4])
+                    full_desc = f"{c_summary}{feat_str}" if c_summary else feat_str.lstrip("<br/>")
+                    comp_rows.append([str(idx + 1), c_name, full_desc or "—"])
+            t_comps = create_wrapped_table(comp_rows, [25, 175, 340], is_first_row_header=True)
+            if t_comps:
+                elements.extend([t_comps, Spacer(1, 3)])
+
+        # 2B. Artificial Intelligence & Automated Decision Architecture
+        ai_spec = scope.get("ai_ml_specifications", {})
+        if isinstance(ai_spec, dict) and any(ai_spec.values()):
+            ai_rows = [["AI Architecture Specification", "Mandated Terms / Requirements"]]
+            for k, label in [
+                ("model_type", "Mandated Model Type"),
+                ("hosting_and_privacy", "Hosting & Data Privacy"),
+                ("role", "Functional AI Responsibilities"),
+                ("feedback_loop", "Continuous Learning & Feedback Loop")
+            ]:
+                if ai_spec.get(k):
+                    ai_rows.append([label, str(ai_spec[k])])
+            if len(ai_rows) > 1:
+                elements.append(Paragraph("<b>B. Artificial Intelligence (AI) Layer & Decision Support:</b>", body_style))
+                t_ai = create_wrapped_table(ai_rows, [160, 380], is_first_row_header=True)
+                if t_ai:
+                    elements.extend([t_ai, Spacer(1, 3)])
+
+        # 2C. Operational Modules: Mobile Field App, Weather Tiers, Dissemination, GIS & Stages
+        field_specs = []
+        if scope.get("field_mobile_app_features"):
+            field_specs.append(("Mobile App & Field Protocol", scope["field_mobile_app_features"]))
+        if scope.get("weather_and_data_sources"):
+            field_specs.append(("Weather Data Ingestion Tiers", scope["weather_and_data_sources"]))
+        if scope.get("dissemination_channels"):
+            field_specs.append(("Dissemination & Messaging Channels", scope["dissemination_channels"]))
+        if scope.get("geospatial_and_gis"):
+            field_specs.append(("Geospatial (GIS) & Boundary Layers", scope["geospatial_and_gis"]))
+        if scope.get("implementation_stages"):
+            field_specs.append(("Implementation Stages & Rollout Roadmap", scope["implementation_stages"]))
+
+        if field_specs:
+            spec_rows = [["Operational Domain", "Key Mandates & Specifications"]]
+            for domain_label, items in field_specs:
+                if isinstance(items, list):
+                    items_str = "<br/>• " + "<br/>• ".join(str(it) for it in items[:5])
+                    spec_rows.append([domain_label, items_str.lstrip("<br/>")])
+            t_spec = create_wrapped_table(spec_rows, [160, 380], is_first_row_header=True)
+            if t_spec:
+                elements.append(Paragraph("<b>C. Operational Modules, Data Feeds & Implementation Roadmap:</b>", body_style))
+                elements.extend([t_spec, Spacer(1, 3)])
+
+        # 2D. Technical, Functional, Security & Support Requirements
         for label, key in [
             ("Functional Requirements", "functional_requirements"),
             ("Technical & Architecture Requirements", "technical_requirements"),
@@ -2114,7 +2365,7 @@ def build_output_pdf(data: dict, output_pdf_path: Path):
 # SECTION 14: EXECUTION ORCHESTRATOR & CLI ENTRYPOINT
 # ==============================================================================
 
-def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output_dir: Path = None, on_progress = None):
+def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, provider: str = "gemini", model: str = None, output_dir: Path = None, on_progress = None):
     """Processes single or multiple PDF proposals with optional Excel BOQ file and live progress reporting."""
     if isinstance(pdf_input, (list, tuple)):
         pdf_paths = [Path(p) for p in pdf_input]
@@ -2127,12 +2378,13 @@ def process_pair(pdf_input, excel_path: Path = None, api_key: str = None, output
 
     print(f"\n==========================================")
     print(f" Processing Tender Document(s): {pdf_names}")
+    print(f" Provider: {provider.upper()} | Model: {model or 'Default'}")
     if excel_path and excel_path.exists():
         print(f" Linked Excel:   {excel_path.name}")
     print(f"==========================================")
     try:
         has_excel = bool(excel_path and excel_path.exists())
-        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel, api_key=api_key, on_progress=on_progress)
+        extracted_json = run_multi_pass_analysis(pdf_paths, has_excel=has_excel, api_key=api_key, provider=provider, model=model, on_progress=on_progress)
 
         if has_excel:
             if on_progress:
@@ -2183,6 +2435,9 @@ def main():
     parser = argparse.ArgumentParser(description="Universal AI Tender Document Analyzer.")
     parser.add_argument("pdf", nargs="?", help="Path to PDF tender document")
     parser.add_argument("--excel", "--boq", dest="excel", help="Path to Excel BOQ file (.xlsx / .xls)")
+    parser.add_argument("--provider", choices=["gemini", "openai"], default="gemini", help="LLM Provider: gemini or openai")
+    parser.add_argument("--model", help="LLM Model (e.g. gemini-2.5-flash or gpt-4o-mini)")
+    parser.add_argument("--api-key", help="API Key for selected provider")
     args = parser.parse_args()
 
     if args.pdf:
@@ -2191,7 +2446,7 @@ def main():
             print(f"[!] PDF file not found: {pdf_path}")
             return
         excel_path = Path(args.excel) if args.excel else None
-        process_pair(pdf_path, excel_path)
+        process_pair(pdf_path, excel_path, api_key=args.api_key, provider=args.provider, model=args.model)
         return
 
     pdf_files = list(INPUT_DIR.glob("*.pdf"))
@@ -2207,7 +2462,7 @@ def main():
             if ef.stem.lower() in pdf_path.stem.lower() or pdf_path.stem.lower() in ef.stem.lower():
                 matched_excel = ef
                 break
-        process_pair(pdf_path, matched_excel)
+        process_pair(pdf_path, matched_excel, api_key=args.api_key, provider=args.provider, model=args.model)
 
 if __name__ == "__main__":
     main()
