@@ -793,9 +793,10 @@ def call_gemini(system_prompt: str, user_prompt: str, model: str = None, api_key
     # Primary model with automatic free fallback chain if primary experiences high demand (503/429)
     default_models = [
         "gemini-2.5-flash",       # Primary — high quality & fast
-        "gemini-2.0-flash",       # Fallback 1 — fast
-        "gemini-1.5-flash",       # Fallback 2 — stable
-        "gemini-1.5-pro",         # Fallback 3 — high reasoning
+        "gemini-3.5-flash",       # Fallback 1 — frontier balanced & fast
+        "gemini-3.8-flash",       # Fallback 2 — high intelligence & fast
+        "gemini-3.5-flash-lite",  # Fallback 3 — cost-efficient & rapid
+        "gemini-flash-latest",    # Fallback 4 — auto-latest flash
     ]
     if model:
         candidate_models = [model] + [m for m in default_models if m != model]
