@@ -140,10 +140,14 @@ with st.sidebar:
     else:
         gemini_models = [
             "gemini-2.5-flash (Recommended - Fast & Accurate)",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.5-pro",
+            "gemini-3.8-flash (Frontier - Ultra Fast & High Intelligence)",
+            "gemini-3.5-flash (Balanced - High Performance)",
+            "gemini-3.5-flash-lite (Cost-Efficient & Rapid)",
+            "gemini-3.1-flash-lite (Lightweight & High Speed)",
+            "gemini-3.1-pro-preview (Deep Reasoning & Analysis)",
+            "gemini-3.7-flash (Hybrid Reasoning)",
+            "gemini-flash-latest (Auto-updates to Latest Flash)",
+            "gemini-pro-latest (Auto-updates to Latest Pro)",
             "Custom Model..."
         ]
         selected_model_choice = st.selectbox(
